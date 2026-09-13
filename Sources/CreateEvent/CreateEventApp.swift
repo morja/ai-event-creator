@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 import EventCore
 
@@ -7,72 +8,87 @@ struct CreateEventApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     var body: some Scene {
-        Settings { EmptyView() }
+        Settings { SettingsView(model: delegate.model) }
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = AppModel()
     private var window: NSWindow?
+    private let serviceLog = Logger(subsystem: "org.aieventextractor.mac", category: "service")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        showWindow()
+        NSApp.setActivationPolicy(.accessory)
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
+
+        model.onExtractionFinished = { [weak self] in self?.showWindow() }
+
+        // A Services launch is not a default app launch. Stay invisible until the preview is ready.
+        let defaultLaunch = (notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? NSNumber)?.boolValue ?? true
+        serviceLog.info("Default launch: \(defaultLaunch)")
+        if defaultLaunch { showWindow() }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showWindow()
+        if !model.busy { showWindow() }
         return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.terminate(nil)
     }
 
     func showWindow() {
         if window == nil {
-            let view = ContentView(model: model)
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 820),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-            window.title = "Create Event"
-            window.contentView = NSHostingView(rootView: view)
-            window.minSize = NSSize(width: 760, height: 650)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 590),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  backing: .buffered, defer: false)
+            window.title = "AIEventExtractor"
+            window.contentView = NSHostingView(rootView: ContentView(model: model))
+            window.minSize = NSSize(width: 580, height: 460)
             window.isReleasedWhenClosed = false
+            window.delegate = self
             window.center()
             self.window = window
         }
-        NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        serviceLog.info("App window visible: \(self.window?.isVisible ?? false)")
     }
 
     @objc func createEvent(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        serviceLog.info("Service request received")
         guard let text = pasteboard.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            error.pointee = "Select some text first."
+            error.pointee = "Bitte zuerst Text auswählen."
             return
         }
         guard text.count <= 30000 else {
-            error.pointee = "Select at most 30,000 characters."
+            error.pointee = "Bitte höchstens 30.000 Zeichen auswählen."
             return
         }
-        // Preserve an existing draft in its window. A service invocation must not silently replace edits.
-        if !model.source.isEmpty || !model.draft.title.isEmpty {
+
+        // A second invocation must not silently discard an unsaved preview or edited input.
+        if !model.source.isEmpty && !model.saved {
             showWindow()
             let alert = NSAlert()
-            alert.messageText = "Replace the current draft?"
-            alert.informativeText = "The newly selected text will replace this window's input and unsaved edits."
-            alert.addButton(withTitle: "Replace")
-            alert.addButton(withTitle: "Cancel")
+            alert.messageText = "Aktuellen Entwurf ersetzen?"
+            alert.informativeText = "Der neu ausgewählte Text ersetzt den noch nicht gespeicherten Termin."
+            alert.addButton(withTitle: "Ersetzen")
+            alert.addButton(withTitle: "Abbrechen")
             if let window {
-                // Return from the Service promptly instead of holding its IPC call during review.
                 alert.beginSheetModal(for: window) { [weak self] response in
                     guard response == .alertFirstButtonReturn else { return }
-                    self?.model.receive(text)
+                    self?.model.receive(text, automatic: true)
                 }
             }
             return
         }
-        model.receive(text)
-        showWindow()
-        // Network transmission requires the visible Extract button, including on first launch.
+
+        model.receive(text, automatic: true)
     }
 }
 
@@ -81,128 +97,176 @@ struct ContentView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Create Event").font(.largeTitle.weight(.semibold))
-                        Text("Selected text → editable preview → Calendar").foregroundStyle(.secondary)
-                    }
+                    Text("AIEventExtractor").font(.title2.weight(.semibold))
                     Spacer()
-                    Button("Settings…") { model.showSettings = true }
+                    Button("Einstellungen…") { model.showSettings = true }
                 }
-                Text("Paste event details or select text in another app and use Services → Create Event with Create Event.")
-                TextEditor(text: $model.source)
-                    .font(.body).frame(height: 145).padding(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                    .disabled(model.busy)
-                    .accessibilityLabel("Original event text")
-                Picker("Extraction", selection: $model.provider) {
-                    ForEach(ExtractionProvider.allCases, id: \.self) { provider in
-                        Text(provider.name).tag(provider)
-                    }
-                }.disabled(model.busy)
-                if model.provider.isLocal {
-                    HStack {
-                        Picker("Local model", selection: $model.localModelID) {
-                            Text("Choose a model…").tag("")
-                            ForEach(model.localModels) { local in Text(local.id).tag(local.id) }
-                        }
-                        Button("Refresh models") { Task { await model.discoverLocalModels() } }
-                            .disabled(model.discovering || model.busy)
-                        if model.discovering { ProgressView().controlSize(.small) }
-                    }
-                    if !model.modelStatus.isEmpty {
-                        Text(model.modelStatus).font(.callout).foregroundStyle(.secondary)
-                    }
-                    Text("The request goes to \(model.provider.name) at 127.0.0.1. Start its local server first. No OpenRouter fallback occurs. Check that the server itself uses a local model.")
-                        .font(.callout).foregroundStyle(.secondary)
+
+                if model.saved {
+                    success
+                } else if model.showsComposer {
+                    composer
+                } else if model.busy {
+                    progress
+                } else if model.draft.title.isEmpty {
+                    failure
                 } else {
-                    Text("Extract sends this text to OpenRouter and its model provider. Their retention and training policies may differ. Your Calendar contents are never sent.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    preview
                 }
-                HStack {
-                    Button(model.provider.isLocal ? "Extract locally" : "Extract with OpenRouter") { model.extract() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.busy || model.source.isEmpty || (model.provider.isLocal && model.localModelID.isEmpty))
-                    if model.busy {
-                        ProgressView().controlSize(.small)
-                        Button("Cancel") { model.cancel() }
-                    }
-                    Spacer()
-                    Button("Clear / new event") { model.receive("") }.disabled(model.busy)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Text für einen Termin einfügen").font(.title3.weight(.medium))
+            TextEditor(text: $model.source)
+                .frame(height: 210)
+                .padding(6)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+                .accessibilityLabel("Termintext")
+            Text("Oder Text in einer anderen App markieren und den Dienst „Termin mit AIEventExtractor erstellen“ wählen.")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Button("Terminvorschau erstellen") {
+                    model.showsComposer = false
+                    model.extract()
                 }
-                Divider()
-                Text("Preview and edit").font(.title2.weight(.semibold))
-                if !model.draft.uncertainties.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Needs your attention").fontWeight(.semibold)
-                        ForEach(Array(model.draft.uncertainties.enumerated()), id: \.offset) { _, warning in
-                            Text("• \(warning)")
-                        }
-                    }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                }
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-                    GridRow { Text("Title"); TextField("Event title", text: $model.draft.title) }
-                    GridRow { Text("Location"); TextField("Address or meeting link", text: $model.draft.location) }
-                    GridRow { Text("All day"); Toggle("All-day event", isOn: $model.draft.allDay) }
-                    GridRow {
-                        Text("Start")
-                        HStack {
-                            TextField(model.presentation.dateHint, text: $model.startDate)
-                            if !model.draft.allDay { TextField(model.presentation.timeHint, text: $model.startTime) }
-                        }
-                    }
-                    GridRow {
-                        Text(model.draft.allDay ? "Last day, inclusive" : "End")
-                        HStack {
-                            TextField(model.presentation.dateHint, text: $model.endDate)
-                            if !model.draft.allDay { TextField(model.presentation.timeHint, text: $model.endTime) }
-                        }
-                    }
-                    GridRow { Text("Time zone"); TextField("Europe/Berlin", text: $model.draft.timeZone) }
-                    GridRow {
-                        Text("Notes")
-                        TextEditor(text: $model.draft.notes).frame(height: 65)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
-                    }
-                }.textFieldStyle(.roundedBorder).disabled(model.busy || model.saved)
-                Text("Dates: \(model.presentation.dateHint). Times: \(model.presentation.timeHint). Missing dates and times must be completed. For all-day events, enter the last included day.")
+                .buttonStyle(.borderedProminent)
+                .disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Spacer()
+                Text("Bei OpenRouter wird der Text dabei übertragen.")
                     .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button(model.calendars.isEmpty ? "Connect Calendar…" : "Refresh calendars") {
-                        Task { await model.loadCalendars() }
+            }
+        }
+    }
+
+    private var progress: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Terminvorschau wird erstellt…").font(.title3)
+            }
+            Button("Abbrechen") {
+                model.cancel()
+                model.showsComposer = true
+                model.status = ""
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .leading)
+    }
+
+    private var failure: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            Text("Keine Terminvorschau verfügbar").font(.title3.weight(.medium))
+            Text(model.status.isEmpty ? "Bitte Einstellungen und Text prüfen." : model.status)
+                .textSelection(.enabled)
+            HStack {
+                Button("Erneut versuchen") { model.extract() }
+                    .buttonStyle(.borderedProminent)
+                Button("Text bearbeiten") { model.showsComposer = true }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .leading)
+    }
+
+    private var success: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            Text("Termin gespeichert").font(.title3.weight(.medium))
+            Text(model.status)
+            Button("Neuer Termin") { model.receive("", automatic: false) }
+                .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .leading)
+    }
+
+    private var preview: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            Text("Terminvorschau").font(.title3.weight(.medium))
+
+            if !model.draft.uncertainties.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(model.draft.uncertainties.enumerated()), id: \.offset) { _, warning in
+                        Text("• \(warning)")
                     }
-                    Picker("Calendar", selection: $model.calendarID) {
-                        Text("Choose…").tag("")
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.orange.opacity(0.13), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            TextField("Titel", text: $model.draft.title)
+                .font(.title2)
+                .textFieldStyle(.roundedBorder)
+
+            Toggle("Ganztägig", isOn: $model.draft.allDay)
+
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    Text("Beginn")
+                    HStack {
+                        TextField(model.presentation.dateHint, text: $model.startDate)
+                        if !model.draft.allDay { TextField(model.presentation.timeHint, text: $model.startTime) }
+                    }
+                }
+                GridRow {
+                    Text(model.draft.allDay ? "Letzter Tag" : "Ende")
+                    HStack {
+                        TextField(model.presentation.dateHint, text: $model.endDate)
+                        if !model.draft.allDay { TextField(model.presentation.timeHint, text: $model.endTime) }
+                    }
+                }
+                GridRow {
+                    Text("Ort")
+                    TextField("Optional", text: $model.draft.location)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+
+            DisclosureGroup("Weitere Angaben") {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Zeitzone", text: $model.draft.timeZone)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Notizen").font(.callout)
+                    TextEditor(text: $model.draft.notes)
+                        .frame(height: 75)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                    Picker("Kalender", selection: $model.calendarID) {
+                        Text("Standardkalender").tag("")
                         ForEach(model.calendars, id: \.calendarIdentifier) { calendar in
                             Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
                         }
                     }
+                    Button("Kalender aktualisieren") { Task { await model.loadCalendars() } }
+                    DisclosureGroup("Originaltext") {
+                        Text(model.source).textSelection(.enabled).font(.callout)
+                    }
                 }
-                Toggle("I checked the title, dates, time zone and any warnings against the source.", isOn: $model.reviewed)
-                    .disabled(model.busy || model.saved)
-                HStack {
-                    Button(model.saved ? "Saved" : "Create event in Calendar") { model.save() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!model.reviewed || model.busy || model.saved || model.calendarID.isEmpty)
-                    Text("Only this button creates an event.").font(.caption).foregroundStyle(.secondary)
+                .padding(.top, 8)
+            }
+
+            if !model.status.isEmpty { Text(model.status).font(.callout).textSelection(.enabled) }
+
+            HStack {
+                Button("Termin erstellen") {
+                    Task {
+                        await model.confirmAndSave()
+                        if model.saved { NSApp.terminate(nil) }
+                    }
                 }
-                if !model.status.isEmpty { Text(model.status).textSelection(.enabled).font(.callout) }
-            }.padding(24)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.busy || model.saving || model.saved)
+                if model.saving { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Verwerfen") { NSApp.terminate(nil) }
+            }
         }
-        .onChange(of: model.draft) { model.reviewed = false }
-        .onChange(of: model.source) { model.reviewed = false }
-        .onChange(of: model.startDate) { model.reviewed = false }
-        .onChange(of: model.endDate) { model.reviewed = false }
-        .onChange(of: model.startTime) { model.reviewed = false }
-        .onChange(of: model.endTime) { model.reviewed = false }
-        .onChange(of: model.provider) { _, value in model.selectProvider(value) }
-        .onChange(of: model.localModelID) { _, value in
-            UserDefaults.standard.set(value, forKey: "localModel.\(model.provider.rawValue)")
-        }
-        .task { if model.provider.isLocal { await model.discoverLocalModels() } }
-        .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
+        .disabled(model.saving || model.saved)
     }
 }
 
@@ -214,58 +278,106 @@ struct SettingsView: View {
     @State private var configured = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("OpenRouter settings").font(.title2.weight(.semibold))
-            Text("Use your own OpenRouter account. Your key is stored in this Mac's Keychain. The app does not import credentials from other apps.")
-            Link("Create or manage your API key", destination: URL(string: "https://openrouter.ai/settings/keys")!)
-            SecureField(configured ? "New key to replace the saved key" : "OpenRouter API key", text: $key)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Button("Save key") {
-                    do {
-                        let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !value.isEmpty else { throw DraftError("Enter a key first.") }
-                        try Keychain.save(value)
-                        key = ""
-                        configured = true
-                        message = "Key saved in Keychain."
-                    } catch { message = error.localizedDescription }
-                }
-                Button("Delete saved key") {
-                    do { try Keychain.save(""); configured = false; message = "Key removed." }
-                    catch { message = error.localizedDescription }
-                }
-            }
-            TextField("Model", text: $model.model).textFieldStyle(.roundedBorder)
-            Text("Default: openrouter/free. You may choose a specific model ending in :free. Paid models and paid fallbacks are disabled. Free capacity and structured-output support can vary; rate limits apply.")
-                .font(.callout).foregroundStyle(.secondary)
-            Toggle("German dates and 24-hour times", isOn: $model.germanDates)
-            Text("Changing this preference clears the editable date/time fields. Re-extract or re-enter them in the new format.")
-                .font(.caption).foregroundStyle(.secondary)
-            Text("Only pressing Extract sends selected text to the chosen extraction provider. Local mode uses a server on this Mac. The app keeps drafts in memory and does not log text or keys.")
-            HStack {
-                Link("OpenRouter privacy policy", destination: URL(string: "https://openrouter.ai/privacy")!)
-                Spacer()
-                Button("Done") {
-                    guard OpenRouterClient.isFreeModel(model.model.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                        message = "Choose openrouter/free or a model ending in :free."
-                        return
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Einstellungen").font(.title2.weight(.semibold))
+
+                Picker("Texterkennung", selection: $model.provider) {
+                    ForEach(ExtractionProvider.allCases, id: \.self) { provider in
+                        Text(provider.name).tag(provider)
                     }
-                    model.model = model.model.trimmingCharacters(in: .whitespacesAndNewlines)
-                    UserDefaults.standard.set(model.model, forKey: "model")
-                    dismiss()
-                }.keyboardShortcut(.defaultAction)
+                }
+
+                if model.provider.isLocal {
+                    HStack {
+                        Picker("Modell", selection: $model.localModelID) {
+                            Text("Modell auswählen…").tag("")
+                            ForEach(model.localModels) { local in Text(local.id).tag(local.id) }
+                        }
+                        Button("Aktualisieren") { Task { await model.discoverLocalModels() } }
+                            .disabled(model.discovering)
+                    }
+                    if !model.modelStatus.isEmpty { Text(model.modelStatus).font(.callout).foregroundStyle(.secondary) }
+                } else {
+                    Link("OpenRouter-API-Schlüssel erstellen", destination: URL(string: "https://openrouter.ai/settings/keys")!)
+                    SecureField(configured ? "Neuen API-Schlüssel eingeben" : "API-Schlüssel", text: $key)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("Schlüssel speichern") {
+                            do {
+                                let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !value.isEmpty else { throw DraftError("Bitte einen Schlüssel eingeben.") }
+                                try Keychain.save(value)
+                                key = ""
+                                configured = true
+                                message = "Schlüssel im Schlüsselbund gespeichert."
+                            } catch { message = error.localizedDescription }
+                        }
+                        Button("Schlüssel löschen") {
+                            do { try Keychain.save(""); configured = false; message = "Schlüssel gelöscht." }
+                            catch { message = error.localizedDescription }
+                        }
+                    }
+                    TextField("OpenRouter-Modell", text: $model.model)
+                        .textFieldStyle(.roundedBorder)
+                    Toggle("Bezahlte OpenRouter-Modelle erlauben", isOn: $model.allowPaidModels)
+                    Text(model.allowPaidModels
+                         ? "Ein Dienstaufruf startet die Extraktion sofort. Für dieses Modell können dadurch Kosten entstehen. Es gibt keinen Modell-Fallback."
+                         : "Standard: openrouter/free. Andere kostenlose Modelle enden mit :free.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+
+                Divider()
+                Toggle("Deutsche Datumsanzeige und 24-Stunden-Zeit", isOn: $model.germanDates)
+
+                HStack {
+                    Button("Kalender verbinden") { Task { await model.loadCalendars() } }
+                    Picker("Kalender", selection: $model.calendarID) {
+                        Text("Standardkalender").tag("")
+                        ForEach(model.calendars, id: \.calendarIdentifier) { calendar in
+                            Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
+                        }
+                    }
+                }
+
+                Text("Der macOS-Dienst überträgt den ausgewählten Text sofort an den hier gewählten Anbieter. Erst „Termin erstellen“ schreibt in den Kalender.")
+                    .font(.callout).foregroundStyle(.secondary)
+
+                HStack {
+                    Link("OpenRouter-Datenschutz", destination: URL(string: "https://openrouter.ai/privacy")!)
+                    Spacer()
+                    Button("Fertig") {
+                        let selected = model.model.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if model.provider == .openRouter && !OpenRouterClient.isAllowedModel(selected, allowPaid: model.allowPaidModels) {
+                            message = "Kostenloses Modell wählen oder bezahlte Modelle aktivieren und eine konkrete Modell-ID eintragen."
+                            return
+                        }
+                        model.model = selected
+                        UserDefaults.standard.set(selected, forKey: "model")
+                        UserDefaults.standard.set(model.allowPaidModels, forKey: "allowPaidModels")
+                        dismiss()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+                if !message.isEmpty { Text(message).font(.callout) }
             }
-            if !message.isEmpty { Text(message).font(.callout) }
-        }.padding(24).frame(width: 570)
-        .onChange(of: model.germanDates) {
-            UserDefaults.standard.set(model.germanDates, forKey: "germanDates")
-            model.startDate = ""; model.endDate = ""; model.startTime = ""; model.endTime = ""
-            model.reviewed = false
+            .padding(24)
+        }
+        .frame(width: 570, height: 580)
+        .onChange(of: model.provider) { _, value in model.selectProvider(value) }
+        .onChange(of: model.localModelID) { _, value in
+            UserDefaults.standard.set(value, forKey: "localModel.\(model.provider.rawValue)")
+        }
+        .onChange(of: model.calendarID) { _, value in
+            UserDefaults.standard.set(value, forKey: "calendarID")
+        }
+        .onChange(of: model.germanDates) { old, new in
+            model.changeDatePreference(from: old, to: new)
         }
         .task {
             do { configured = !(try Keychain.read()).isEmpty }
             catch { message = error.localizedDescription }
+            if model.provider.isLocal { await model.discoverLocalModels() }
         }
     }
 }

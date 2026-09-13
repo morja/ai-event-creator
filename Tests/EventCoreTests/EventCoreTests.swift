@@ -1,7 +1,24 @@
 import XCTest
+import Security
 @testable import EventCore
+@testable import CreateEvent
 
 final class EventCoreTests: XCTestCase {
+    func testOpenRouterKeychainItemBelongsToThisApp() {
+        let infoURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/Info.plist")
+        let info = NSDictionary(contentsOf: infoURL)
+        let bundleID = info?["CFBundleIdentifier"] as? String
+
+        XCTAssertEqual(bundleID, "org.aieventextractor.mac")
+        XCTAssertEqual(Keychain.service, "\(bundleID ?? "").openrouter")
+        XCTAssertEqual(Keychain.service, "org.aieventextractor.mac.openrouter")
+        XCTAssertEqual(Keychain.query[kSecAttrService as String] as? String, Keychain.service)
+    }
+
     func draft() -> EventDraft {
         var d = EventDraft()
         d.title = "Team meeting"
@@ -104,6 +121,54 @@ final class EventCoreTests: XCTestCase {
         XCTAssertThrowsError(try OpenRouterClient.request(text: "", key: "x", model: "openrouter/free"))
         XCTAssertThrowsError(try OpenRouterClient.request(text: String(repeating: "a", count: 30001), key: "x", model: "openrouter/free"))
         XCTAssertThrowsError(try OpenRouterClient.request(text: text, key: "", model: "openrouter/free"))
+    }
+
+    func testPaidModelNeedsExplicitOptIn() throws {
+        let text = "Team meeting on 2026-09-20"
+        XCTAssertThrowsError(try OpenRouterClient.request(text: text, key: "x", model: "openai/gpt-4o-mini"))
+
+        let request = try OpenRouterClient.request(text: text, key: "x", model: "openai/gpt-4o-mini", allowPaid: true)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "openai/gpt-4o-mini")
+        XCTAssertNil(body["models"])
+        XCTAssertEqual((body["provider"] as? [String: Any])?["allow_fallbacks"] as? Bool, false)
+        XCTAssertThrowsError(try OpenRouterClient.request(text: text, key: "x", model: "openrouter/auto", allowPaid: true))
+    }
+
+    func testMissingYearInSingleGermanDateRangeUsesCurrentYear() throws {
+        var extracted = EventDraft()
+        extracted.title = "Jahrestreffen der Satsanggruppen"
+        extracted.allDay = true
+        extracted.uncertainties = ["Das Jahr fehlt."]
+        let source = "Jahrestreffen der Satsanggruppen\n18. bis 20. September im deutschen Amma-Zentrum"
+        let now = ISO8601DateFormatter().date(from: "2026-09-13T10:00:00Z")!
+
+        let result = EventExtraction.resolveDates(in: extracted, source: source, now: now, zone: TimeZone(identifier: "Europe/Berlin")!)
+        XCTAssertEqual(result.startDate, "2026-09-18")
+        XCTAssertEqual(result.endDate, "2026-09-20")
+        XCTAssertTrue(result.uncertainties.isEmpty)
+        XCTAssertNoThrow(try result.validated())
+    }
+
+    func testExplicitYearIsRecoveredButAmbiguousOrInvalidDatesAreNot() {
+        var extracted = EventDraft()
+        extracted.title = "Jahrestreffen"
+        extracted.allDay = true
+        let zone = TimeZone(identifier: "Europe/Berlin")!
+        let now = ISO8601DateFormatter().date(from: "2026-09-13T10:00:00Z")!
+
+        let explicit = EventExtraction.resolveDates(in: extracted,
+            source: "Jahrestreffen, 18. bis 20. September 2027 im Zentrum", now: now, zone: zone)
+        XCTAssertEqual(explicit.startDate, "2027-09-18")
+        XCTAssertEqual(explicit.endDate, "2027-09-20")
+
+        let ambiguous = EventExtraction.resolveDates(in: extracted,
+            source: "18. September oder 20. September", now: now, zone: zone)
+        XCTAssertTrue(ambiguous.startDate.isEmpty)
+
+        let invalid = EventExtraction.resolveDates(in: extracted,
+            source: "29. Februar", now: now, zone: zone)
+        XCTAssertTrue(invalid.startDate.isEmpty)
     }
 
     func response(_ content: String, finish: String = "stop") throws -> Data {

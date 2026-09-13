@@ -7,10 +7,20 @@ public struct OpenRouterClient: Sendable {
         model == "openrouter/free" || (model.contains("/") && model.hasSuffix(":free") && !model.contains(where: { $0.isWhitespace }))
     }
 
-    public static func request(text: String, key: String, model: String, now: Date = Date(), zone: TimeZone = .current) throws -> URLRequest {
+    public static func isAllowedModel(_ model: String, allowPaid: Bool) -> Bool {
+        if isFreeModel(model) { return true }
+        guard allowPaid, model.count <= 200, model.contains("/"),
+              model != "openrouter/auto", !model.contains(where: { $0.isWhitespace || $0.isNewline }) else { return false }
+        return true
+    }
+
+    public static func request(text: String, key: String, model: String, now: Date = Date(), zone: TimeZone = .current,
+                               allowPaid: Bool = false) throws -> URLRequest {
         try EventExtraction.validateInput(text)
-        guard !key.isEmpty else { throw DraftError("Save your own OpenRouter API key in Settings first.") }
-        guard isFreeModel(model) else { throw DraftError("Choose openrouter/free or a specific model ending in :free. Paid models are disabled.") }
+        guard !key.isEmpty else { throw DraftError("Bitte zuerst den OpenRouter-API-Schlüssel in den Einstellungen speichern.") }
+        guard isAllowedModel(model, allowPaid: allowPaid) else {
+            throw DraftError("Bitte ein kostenloses Modell wählen oder bezahlte Modelle in den Einstellungen freigeben.")
+        }
 
         let body: [String: Any] = [
             "model": model,
@@ -32,8 +42,8 @@ public struct OpenRouterClient: Sendable {
         return request
     }
 
-    public func extract(text: String, key: String, model: String) async throws -> EventDraft {
-        let request = try Self.request(text: text, key: key, model: model)
+    public func extract(text: String, key: String, model: String, allowPaid: Bool = false) async throws -> EventDraft {
+        let request = try Self.request(text: text, key: key, model: model, allowPaid: allowPaid)
         // Ephemeral storage avoids keeping selected text in disk caches. There are no automatic retries.
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
@@ -50,11 +60,11 @@ public struct OpenRouterClient: Sendable {
     public static func decode(_ data: Data, status: Int) throws -> EventDraft {
         switch status {
         case 200...299: break
-        case 401, 403: throw DraftError("OpenRouter rejected access. Check your API key and provider privacy settings.")
-        case 402: throw DraftError("OpenRouter reported a billing restriction. No paid fallback was attempted.")
-        case 429: throw DraftError("The free-model rate limit was reached. Wait before trying again. No paid fallback was attempted.")
-        case 400, 404, 422: throw DraftError("This free model or structured-output provider is unavailable. Try openrouter/free or another compatible :free model.")
-        default: throw DraftError("OpenRouter returned HTTP \(status). Try again later. No paid fallback was attempted.")
+        case 401, 403: throw DraftError("OpenRouter hat den Zugriff abgelehnt. Prüfe API-Schlüssel und Anbieterfreigaben.")
+        case 402: throw DraftError("OpenRouter meldet eine Abrechnungssperre. Es wurde kein anderes Modell versucht.")
+        case 429: throw DraftError("Das Modell hat sein Anfragelimit erreicht. Bitte später erneut versuchen.")
+        case 400, 404, 422: throw DraftError("Für dieses Modell ist keine passende strukturierte Ausgabe verfügbar. Wähle in den Einstellungen ein anderes Modell, zum Beispiel openrouter/free.")
+        default: throw DraftError("OpenRouter antwortet mit HTTP \(status). Es wurde kein anderes Modell versucht.")
         }
         guard data.count <= 200000 else { throw DraftError("The server response was too large.") }
         struct Response: Decodable {
@@ -73,6 +83,6 @@ public struct OpenRouterClient: Sendable {
             }
             return try EventExtraction.decodeContent(content)
         } catch let error as DraftError { throw error }
-        catch { throw DraftError("The model returned invalid event data. Try another free model or enter the event manually.") }
+        catch { throw DraftError("The model returned invalid event data. Try another model or enter the event manually.") }
     }
 }

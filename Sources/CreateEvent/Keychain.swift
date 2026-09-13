@@ -4,7 +4,7 @@ import EventCore
 
 /// Only this app's credential is queried. No imports from other tools or config files.
 enum Keychain {
-    static let service = "org.createevent.mac.openrouter"
+    static let service = "org.aieventextractor.mac.openrouter"
     static let account = "api-key"
     static var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,

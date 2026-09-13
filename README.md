@@ -1,102 +1,72 @@
-# Create Event for macOS
+# AIEventExtractor für macOS
 
-Select event details in another app, send them through macOS Services, review the extracted fields, and explicitly save one event to your chosen Calendar. You can also paste text or enter an event manually. Extraction can run through OpenRouter or a model already available in Ollama or LM Studio on this Mac.
+AIEventExtractor macht aus markiertem Text einen Kalendertermin. Im Kontextmenü eines Programms wählst du unter **Dienste** den Eintrag **Termin mit AIEventExtractor erstellen**. Die App liest den ausgewählten Text, lässt ihn vom eingerichteten Modell auswerten und zeigt eine kurze, editierbare Vorschau. Erst ein Klick auf **Termin erstellen** schreibt den Termin in deinen Kalender. Du kannst die App auch direkt öffnen und Text einfügen.
 
-This is a native SwiftUI/AppKit app using EventKit for Calendar access. It has no Hammerspoon dependency. Version 0.1.0 is a local, buildable open-source foundation under the MIT license. It has not been notarized or published.
+Die App ist in SwiftUI und AppKit geschrieben, nutzt EventKit für den Kalender und braucht kein Hammerspoon. Version 0.2.3 ist ein lokaler, ad-hoc signierter Build. Sie ist nicht notarisiert oder veröffentlicht.
 
-## Build and install
+## Bauen und starten
 
-Requires macOS 14 or later and an Apple toolchain with Swift 6, such as Xcode 16 or later. There are no external package dependencies. The build targets the current machine's architecture. For a public Intel/Apple Silicon release, produce and verify each architecture separately or add a universal build.
+Voraussetzung ist macOS 14 oder neuer mit einem Swift-6-Toolchain, etwa Xcode 16. Externe Swift-Pakete gibt es nicht.
 
 ```sh
 ./scripts/test.sh
 ./scripts/build.sh
-./scripts/install.sh
-open "$HOME/Applications/Create Event.app"
+open "dist/AIEventExtractor.app"
 ```
 
-`build.sh` creates `dist/Create Event.app` and ad-hoc signs it for local use. `install.sh` defaults to `~/Applications`, registers the bundle, and refuses to overwrite an existing app. It accepts an alternative Applications directory as its first argument. Open the bundle, not the bare Swift executable, so macOS can find the Calendar permission description and Services declaration.
+Der Build liegt unter `dist/AIEventExtractor.app`. Mit `./scripts/install.sh` kannst du ihn nach `~/Applications` kopieren und als macOS-Dienst registrieren. Das Skript überschreibt keine vorhandene AIEventExtractor-App. Die neue App hat die eigene Bundle-Kennung `org.aieventextractor.mac`, damit macOS ihren Dienst nicht mit dem früheren `Create Event` verwechselt. Deshalb musst du OpenRouter-Schlüssel und Einstellungen in der neuen App gegebenenfalls erneut hinterlegen und die Kalenderfreigabe neu erteilen. Der alte Build wurde im Projekt als `dist/Create Event.app.disabled` aufbewahrt, damit sein Dienst nicht wieder im Menü erscheint; er wurde nicht gelöscht.
 
-The scripts use the selected Xcode toolchain and repository-local module caches. In an automation environment that blocks Swift's nested build sandbox, run the scripts through the environment's approved local-build mechanism. Normal Terminal execution needs no extra dependencies.
+**Wiederholte Schlüsselbund-Abfrage:** Eine frühere Version von AIEventExtractor las trotz neuer Bundle-Kennung noch den Schlüsselbund-Eintrag der alten App (`org.createevent.mac.openrouter`). Version 0.2.3 verwendet stattdessen `org.aieventextractor.mac.openrouter` und liest oder löscht den alten Eintrag nicht. Du musst den OpenRouter-Schlüssel einmal in **Einstellungen…** neu speichern; bitte nicht im Chat weitergeben. Wenn du nur Ollama oder LM Studio nutzt, ist kein Schlüssel nötig. Für lokale Entwicklungs-Builds ist derzeit keine dauerhafte Codesignatur vorhanden. Nach späteren Neu-Builds kann macOS deshalb erneut nach Schlüsselbund-Zugriff fragen. Für dauerhaft promptfreie Updates braucht die App eine stabile Apple-Signieridentität; auf diesem Entwicklungs-Mac ist momentan keine eingerichtet.
 
-## First use
+## Einrichtung
 
-1. Choose **Extraction → OpenRouter** or a local provider in the app. OpenRouter needs your own API key in **Settings…**. The key goes into this app's Keychain item and is never imported from another tool. The default model is `openrouter/free`; specific models must end in `:free`.
-2. For local extraction, start Ollama or LM Studio's local server, select it under **Extraction**, press **Refresh models**, and choose a listed text model. This needs no OpenRouter key. See [Local models](#local-models) below.
-3. Enable **German dates and 24-hour times** for `TT.MM.JJJJ` and `HH:mm`. German system locales use this by default. Other users get their locale's date and time format. Changing this preference clears the date/time edit fields to avoid interpreting old text under a new format.
-4. Select text in an application that supports macOS Services. Choose **Services → Create Event with Create Event**, or **Termin mit Create Event erstellen** in German. Some apps show a service directly in the context menu. Alternatively, paste directly into the app.
-5. Press **Extract with OpenRouter** or **Extract locally**. This explicit action sends the visible text to the chosen provider. Invoking the Service alone does not send it.
-6. Review and edit the title, dates, times, time zone, location and notes. Complete missing fields and resolve warnings. You can edit these fields without making a network request.
-7. Press **Connect Calendar…**, grant Calendar access, and choose a writable calendar. Full Calendar access is needed to list actual calendars for selection. The app does not fetch existing events.
-8. Confirm the review checkbox and press **Create event in Calendar**. Only this action saves. The button locks after success to prevent a repeated click from duplicating the event. Use **Clear / new event** for another event.
+Öffne **Einstellungen…** und wähle die Texterkennung:
 
-Services are available only where the source application exposes selected text to macOS. For a keyboard shortcut, open **System Settings → Keyboard → Keyboard Shortcuts → Services**, find **Create Event with Create Event / Termin mit Create Event erstellen**, enable it and assign a shortcut there. That shortcut invokes the same selection-based Service. It is not a global clipboard shortcut, and it does not require Accessibility permission. If the menu is missing, reopen the source app; if necessary log out and in. A new Service invocation asks before replacing a current draft. macOS decides whether a context menu promotes the item directly or nests it under Services.
+- **OpenRouter:** Hinterlege deinen eigenen API-Schlüssel im macOS-Schlüsselbund und trage eine Modell-ID ein. `openrouter/free` ist der kostenlose Standard. Für ein konkretes bezahltes Modell wie `openai/gpt-4o-mini` aktiviere **Bezahlte OpenRouter-Modelle erlauben**. Ohne dieses Häkchen akzeptiert die App nur `openrouter/free` und IDs mit `:free`. `openrouter/auto` bleibt gesperrt, weil dabei kein bestimmtes Modell feststeht. Die App versucht keinen Modell-Fallback.
+- **Ollama oder LM Studio:** Starte den lokalen Server, aktualisiere die Modellliste und wähle ein Textmodell. Dafür ist kein OpenRouter-Schlüssel nötig. Die App verbindet sich nur mit `127.0.0.1:11434` für Ollama oder `127.0.0.1:1234` für LM Studio. Sie lädt keine Modelle herunter und startet keinen Server.
 
-## Local models
+In den Einstellungen kannst du außerdem einen Kalender festlegen. Ohne Auswahl nimmt die App nach deiner Bestätigung den beschreibbaren Standardkalender. Beim ersten Speichern fragt macOS nach Kalenderzugriff. Die App ruft keine bestehenden Termine ab.
 
-The app queries `http://127.0.0.1:11434/api/tags` and then `/api/show` for Ollama, or `http://127.0.0.1:1234/v1/models` for LM Studio. Ollama entries that cannot be opened for chat, including stale manifests, are not offered. Start the appropriate server first. For Ollama, `ollama serve` starts it when it is not already running; `ollama list` shows its manifests. For LM Studio, start the local server in its Developer tab. Press **Refresh models** after installing or loading a model. The app does not download models or start a server for you. LM Studio's model list can show only loaded models or all downloaded models, depending on its just-in-time loading setting. A listed embedding or non-text model will not extract events.
+**Wichtig bei bezahlten Modellen:** Ein Aufruf über das Dienste-Menü startet die Extraktion sofort und kann deshalb Kosten verursachen. Der Text geht dabei an OpenRouter und den Modellanbieter. Der Kalendereintrag entsteht trotzdem erst nach deiner Bestätigung.
 
-On the development Mac, Ollama lists `gemma3:4b`, but its model files are incomplete: `ollama show gemma3:4b` reports "model not found" and a chat request fails. The list alone does not prove a model works. Repair or download a model in Ollama before selecting it. Smaller models may be less reliable at separating event dates from unrelated text or following the JSON schema, particularly with ambiguous German dates. Always compare the result with the source. No local provider is silently substituted for another, and local-mode HTTP redirects are refused. Only the loopback server receives the app's request. Ollama also supports cloud models through its local API, so [disable Ollama cloud features](https://docs.ollama.com/cloud#local-only) if you require offline processing; check LM Studio's server settings as well.
+## Verwendung über Rechtsklick oder Tastatur
 
-## Dates and uncertainty
+Markiere Text in einer App, die macOS-Dienste für ausgewählten Text unterstützt. Wähle im Kontextmenü **Dienste → Termin mit AIEventExtractor erstellen**. macOS kann den Dienst in manchen Apps direkt im Kontextmenü anzeigen; die App kann diese Platzierung nicht erzwingen. Der englische Menüeintrag heißt **Create event with AIEventExtractor**.
 
-The model returns civil dates in `YYYY-MM-DD`, 24-hour times and an IANA time zone. The app displays them according to the selected preference. Date validation rejects impossible dates, missing years, invalid zones, reversed ranges and nonexistent local times at daylight-saving changes. Repeated local times during an autumn clock change require correction to an explicit UTC time and the `UTC` zone.
+Für ein Tastaturkürzel öffne **Systemeinstellungen → Tastatur → Tastaturkurzbefehle → Dienste** und weise dem Eintrag dort ein Kürzel zu. Das ist derselbe Auswahl-Workflow, kein Zwischenablage-Hotkey. Wenn der neue Name nicht erscheint, starte die Quell-App neu. Gegebenenfalls ist eine erneute Anmeldung bei macOS nötig.
 
-All-day ranges use the last **included** day in both the extraction response and editor. On save, the app advances that date by one calendar day to produce EventKit's exclusive end. It does not add a fixed 24 hours, which would mishandle clock changes.
+AIEventExtractor muss vorher nicht laufen. macOS startet die App erst beim Dienste-Aufruf. Während das Modell arbeitet, bleibt sie ohne Fenster, Dock-Symbol und Menüleisteneintrag im Hintergrund. Danach öffnet sie nur die Vorschau oder eine Fehlermeldung. Beim ersten Test kann das einige Sekunden dauern. Ein zusätzlicher Hintergrunddienst oder Anmeldeobjekt ist nicht nötig. [Apple beschreibt diesen Startmechanismus für macOS-Dienste](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/SysServices/Articles/overview.html).
 
-The prompt asks the model to leave missing or ambiguous fields blank and list uncertainties. This is not a guarantee: a model can invent a plausible but incorrect date that passes local syntax checks. The user must compare every field with the original text. Multiple events, missing years and uncertain relative dates need correction. The app handles one event at a time and does not infer recurrence or attendees.
+In der Vorschau lassen sich Titel, Daten, Uhrzeiten und Ort korrigieren. Zeitzone, Notizen, Kalender und Originaltext stehen unter **Weitere Angaben**. Bei fehlendem Schlüssel, nicht verfügbarem Modell oder einem Antwortfehler zeigt die App **Erneut versuchen** und **Text bearbeiten**. Ein zweiter Dienstaufruf fragt, bevor er einen ungespeicherten Entwurf ersetzt. **Termin erstellen** speichert den Termin und beendet die App. **Verwerfen** oder das Schließen des Fensters beendet sie ebenfalls. Nur wenn du die App selbst direkt öffnest, erscheint das Eingabefenster.
 
-## Privacy, costs and errors
+## Datumsregeln
 
-Only pressing Extract transmits the selected/pasted text, current instant and default time zone. OpenRouter mode sends these to `https://openrouter.ai/api/v1/chat/completions` with your key. Local mode sends them to the chosen Ollama or LM Studio server at `127.0.0.1` over HTTP. Calendar contents are never included. The app uses an ephemeral network session and does not write drafts, text or keys to logs. Drafts live in memory; quitting loses them. Provider, model and display preferences are stored in UserDefaults. The API key is stored in the macOS login Keychain, accessible only while unlocked, with device-only storage.
+Bei einem eindeutigen Tag und Monat ohne Jahr verwendet die Extraktion das **aktuelle Kalenderjahr in der lokalen Zeitzone**. Beispiel: Am 13. September 2026 wird „18. bis 20. September“ als 18. bis 20. September 2026 vorgeschlagen. Ein vergangenes Datum springt nicht heimlich ins nächste Jahr. Wenn das Modell bei genau einem deutschen Datum oder Datumsbereich leere Felder liefert, ergänzt die App das Datum aus dem Text. Ein ausdrücklich genanntes Jahr bleibt erhalten. Mehrdeutige oder ungültige Daten bleiben offen.
 
-In OpenRouter mode, OpenRouter and the chosen provider process the text under their own retention/training policies. Free providers may have different policies. Review [OpenRouter's privacy policy](https://openrouter.ai/privacy) and provider settings before sending sensitive material. Local inference can operate offline if the model files are complete and its server does not forward requests elsewhere.
+Ganztägige Bereiche zeigen als Ende den letzten eingeschlossenen Tag. Für EventKit rechnet die App beim Speichern auf den folgenden Tagesanfang um. Nicht existierende oder doppelte lokale Uhrzeiten bei einer Zeitumstellung lehnt sie ab. Prüfe die Vorschau immer am Originaltext: Auch ein formal gültiges Datum kann inhaltlich falsch sein. Die App erstellt jeweils einen Termin und erkennt keine Wiederholungen oder Teilnehmer.
 
-The default [free router](https://openrouter.ai/docs/guides/routing/routers/free-router) selects among available free models. The app requests strict JSON schema output and disables provider fallback. A specific free model may have no compatible provider. Choose another `:free` model or `openrouter/free` if that happens. The [OpenRouter FAQ](https://openrouter.ai/docs/faq) currently describes a 50-request daily free limit for accounts below its paid-credit threshold, and the [official free-model guide](https://openrouter.ai/blog/tutorials/how-to-get-the-lowest-cost-llm-inference-on-openrouter/) describes 20 requests per minute. These limits and free model availability can change. They are not promised by this app.
+## Datenschutz und lokale Modelle
 
-Errors for authentication, billing restrictions, rate limits, unavailable providers, malformed/truncated JSON and network failures leave the draft unsaved. There is no automatic paid or cloud retry. Input is limited to 30,000 characters; select the relevant event passage from large webpages.
+Der Dienste-Aufruf sendet nur den ausgewählten Text, den aktuellen Zeitpunkt und die Standard-Zeitzone an den gewählten Extraktionsanbieter. Kalenderinhalte gehen nicht mit. Entwürfe bleiben im Speicher, der OpenRouter-Schlüssel im macOS-Schlüsselbund. Modell-, Anbieter- und Anzeigeeinstellungen liegen in UserDefaults. Die App schreibt ausgewählten Text und Schlüssel nicht in Logs.
 
-If Calendar permission is denied, enable it in System Settings → Privacy & Security → Calendars and reconnect. If no writable calendar exists, create one in Calendar and refresh the list. Rebuilding an ad-hoc signed app may cause macOS to ask about Keychain or Calendar access again. Stable Developer ID signing is a release step.
+OpenRouter und sein Modellanbieter haben eigene Datenschutzregeln. Lies vor sensiblen Inhalten die [OpenRouter-Datenschutzhinweise](https://openrouter.ai/privacy) und die Regeln des gewählten Anbieters. Bei Ollama oder LM Studio geht die Anfrage an einen Server auf diesem Mac; die App lehnt HTTP-Weiterleitungen ab. Ein lokaler Ollama-Server kann allerdings selbst Cloud-Modelle verwenden. Wenn du echte Offline-Verarbeitung brauchst, [deaktiviere Ollamas Cloud-Funktionen](https://docs.ollama.com/cloud#local-only) und prüfe die Einstellungen von LM Studio.
 
-## Existing Hammerspoon service
+Ollama wird über `/api/tags` und `/api/show` abgefragt. Die zweite Prüfung verhindert, dass kaputte Modell-Manifeste als verwendbar erscheinen. Auf dem Entwicklungs-Mac meldet `ollama list` derzeit `gemma3:4b`, aber `ollama show gemma3:4b` findet das Modell nicht. Die Gewichte fehlen. AIEventExtractor bietet es daher nicht an. Lade ein funktionierendes Modell nach, wenn du diese lokale Route nutzen willst. LM Studios `/v1/models` kann je nach Just-in-time-Einstellung geladene oder heruntergeladene Modelle melden; reine Embedding-Modelle eignen sich nicht für Termine.
 
-The separate `send-to-hammerspoon-calendar` project next to this repository remains unchanged. Its **Termin erstellen** service and this app's **Termin mit Create Event erstellen** have distinct names and can coexist. The native installer does not install or alter Hammerspoon or its workflows.
+## Tests und Grenzen
 
-## Development and contribution
+`./scripts/test.sh` prüft Datumsvalidierung, Zeitzonen, die Jahresergänzung, OpenRouter-Freigabe für bezahlte Modelle, die Schlüsselbund-Zuordnung, lokale Endpunkte und Modellantworten. Mit einem funktionierenden Ollama-Modell ist ein optionaler Test ohne Kalenderzugriff möglich:
 
-- `Sources/EventCore` contains both provider requests, local model discovery, response parsing, civil-date validation and localized presentation.
-- `Sources/CreateEvent` contains the app window, Service entry point, Keychain storage and EventKit save action.
-- `Resources/Info.plist` declares the native Service and Calendar usage description.
-- `Tests/EventCoreTests` tests date edge cases, all-day DST ranges, locale round-trips, untrusted-text separation, free-only request policy, local loopback requests and response failures.
+```sh
+OLLAMA_SMOKE_MODEL=dein-modell ./scripts/test.sh --filter EventCoreTests/testOptionalOllamaSmoke
+```
 
-Run `./scripts/test.sh` and `./scripts/build.sh` before contributing. Add a regression test for changes to date interpretation or request/response handling. Keep secrets, selected personal text and calendar fixtures out of Git and issue reports. Use synthetic German/English examples with expected dates and a stated time zone. Do not create real events in automated tests.
+Auf dem Entwicklungs-Mac bestanden am 13. September 2026 19 automatisierte Tests; der optionale Ollama-Test wurde ohne Modellwahl übersprungen. Ein früherer Test mit erfundenem Text über `openrouter/free` erzeugte die kurze Vorschau mit dem ergänzten Jahr 2026. Das zuvor gespeicherte konkrete Free-Modell unterstützte die angeforderte strukturierte Ausgabe nicht; `openrouter/free` wurde deshalb als funktionierende kostenlose Einstellung gewählt. Der vorherige Versuch mit `gemma3:4b` scheiterte, weil Ollama das unvollständige Modell nicht öffnen kann. Es wurde kein Modell heruntergeladen und kein Kalendereintrag erzeugt.
 
-With a working Ollama model, run `OLLAMA_SMOKE_MODEL=your-model ./scripts/test.sh --filter EventCoreTests/testOptionalOllamaSmoke` for a local end-to-end extraction using synthetic text. It does not access Calendar. Without that variable, the smoke test is skipped.
+Im TextEdit-Dienste-Menü ist nach der Bereinigung nur noch ein AIEventExtractor-Eintrag sichtbar; der Hammerspoon-Dienst bleibt separat erhalten. Ein früherer Aufruf bei beendeter App startete AIEventExtractor ohne Standardfenster, übergab den ausgewählten Testtext und erzeugte eine Vorschau. Die Oberflächenautomation konnte sich nach der Umbenennung nicht erneut mit dem laufenden App-Fenster verbinden. Inhaltsfreie Diagnosemeldungen bestätigen den Ablauf bis zur Vorschau. Nach der Schlüsselbund-Korrektur wurde die App erneut bei beendeter App über denselben Dienst gestartet. Der neue Schlüsselbund-Eintrag war noch nicht vorhanden, und die App meldete deshalb erwartungsgemäß, dass keine Vorschau möglich ist. Der Schlüssel muss für einen erneuten OpenRouter-End-to-End-Test vom Nutzer in den Einstellungen gespeichert werden.
 
-Review contributions locally or through a fork on a hosting service of your choice. This repository has no configured public remote and the setup scripts do not push anything. The MIT license applies to contributions.
+Vor einer Veröffentlichung bleiben manuelle Prüfungen nötig: die Vorschau des Dienstaufrufs in der neuen App direkt ansehen, OpenRouter mit dem neuen App-Schlüsselbundzugriff testen, Kalenderfreigabe und Speichern prüfen, Intel-Unterstützung klären sowie die App mit einer stabilen Developer-ID signieren und notarisieren. Die App ist nicht für den Mac App Store sandboxed.
 
-## Verification and remaining release work
+Das benachbarte Projekt `send-to-hammerspoon-calendar` bleibt unverändert. Sein Dienst **Termin erstellen** und dieser Dienst haben unterschiedliche Namen und können nebeneinander bestehen.
 
-Verified locally on 2026-09-13 with Swift 6.3.3 on Apple Silicon:
-
-- Release app bundle compiled, Info.plist validated, ad-hoc code signature verified.
-- All 15 offline tests passed without network access or Calendar writes. The optional Ollama smoke test is separate and requires a working local model.
-- The built app launched through Launch Services and macOS listed its native Service with the expected selector and bundle path.
-- The current app's Ollama selection was checked visually. It shows no usable models while the stale `gemma3:4b` manifest remains on this Mac, and extraction stays disabled.
-- Ollama's local model list showed `gemma3:4b` after its server started, but `/api/show` reported that the model was not found. The optional smoke test failed with HTTP 400 because this local download is incomplete. The model blobs directory contains only 24 KB, while the manifest claims 3.3 GB. No model was downloaded or repaired as part of this work.
-
-Not verified in this session: a successful local model inference, an actual text selection delivered through another application's Services menu, a credentialed OpenRouter response, Keychain round-trip, Calendar permission prompt, or a real Calendar save. No existing API key was used and no event was created. These are manual acceptance checks before calling this a release.
-
-Before public distribution, choose a stable bundle identifier/signing identity, test Calendar and Keychain behavior with that signature, verify Intel support if offered, complete accessibility/visual testing and localization, then sign with Developer ID and notarize. This repository includes no signing credentials and is not sandboxed; a Mac App Store build would need a sandbox review and appropriate network/Calendar entitlements.
-
-Implementation references checked against primary sources:
-
-- [Apple Services implementation guide](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/SysServices/Articles/providing.html)
-- [Apple Calendar access migration](https://developer.apple.com/documentation/technotes/tn3152-migrating-to-the-latest-calendar-access-levels)
-- [Apple EventKit event-store access](https://developer.apple.com/documentation/eventkit/accessing-the-event-store)
-- [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs)
-- [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
-- [Ollama model list](https://docs.ollama.com/api/tags) and [structured outputs](https://docs.ollama.com/capabilities/structured-outputs)
-- [Ollama model details](https://docs.ollama.com/api-reference/show-model-details) and [cloud/offline configuration](https://docs.ollama.com/cloud)
-- [LM Studio model list](https://lmstudio.ai/docs/developer/openai-compat/models) and [structured outputs](https://lmstudio.ai/docs/developer/openai-compat/structured-output)
-- [Apple local networking exception](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking)
+Technische Referenzen: [Apple-Dienste](https://developer.apple.com/documentation/bundleresources/information-property-list/nsservices), [EventKit-Kalenderzugriff](https://developer.apple.com/documentation/eventkit/accessing-the-event-store), [OpenRouter Structured Outputs](https://openrouter.ai/docs/guides/features/structured-outputs), [Ollama Structured Outputs](https://docs.ollama.com/capabilities/structured-outputs), [LM Studio Structured Output](https://lmstudio.ai/docs/developer/openai-compat/structured-output).

@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 import EventKit
 import EventCore
@@ -11,14 +12,16 @@ final class AppModel: ObservableObject {
     @Published var endDate = ""
     @Published var startTime = ""
     @Published var endTime = ""
-    @Published var reviewed = false
     @Published var status = ""
     @Published var busy = false
+    @Published var saving = false
     @Published var saved = false
+    @Published var showsComposer = true
     @Published var calendars: [EKCalendar] = []
-    @Published var calendarID = ""
+    @Published var calendarID = UserDefaults.standard.string(forKey: "calendarID") ?? ""
     @Published var showSettings = false
     @Published var model = UserDefaults.standard.string(forKey: "model") ?? "openrouter/free"
+    @Published var allowPaidModels = UserDefaults.standard.bool(forKey: "allowPaidModels")
     @Published var provider = ExtractionProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "") ?? .openRouter
     @Published var localModels: [LocalModel] = []
     @Published var localModelID = ""
@@ -26,11 +29,29 @@ final class AppModel: ObservableObject {
     @Published var modelStatus = ""
     @Published var germanDates = UserDefaults.standard.object(forKey: "germanDates") as? Bool ?? (Locale.current.language.languageCode?.identifier == "de")
     private let store = EKEventStore()
+    private let extractionLog = Logger(subsystem: "org.aieventextractor.mac", category: "extraction")
     private var extraction: Task<Void, Never>?
     private var generation = UUID()
     private var discoveryGeneration = UUID()
+    var onExtractionFinished: (() -> Void)?
 
     var presentation: DatePresentation { DatePresentation(locale: germanDates ? Locale(identifier: "de_DE") : .current) }
+
+    func changeDatePreference(from old: Bool, to new: Bool) {
+        let previous = DatePresentation(locale: old ? Locale(identifier: "de_DE") : .current)
+        let updated = DatePresentation(locale: new ? Locale(identifier: "de_DE") : .current)
+
+        func convert(_ input: String, date: Bool) -> String {
+            guard let wire = try? previous.wire(input, date: date) else { return input }
+            return updated.display(wire, date: date)
+        }
+
+        startDate = convert(startDate, date: true)
+        endDate = convert(endDate, date: true)
+        startTime = convert(startTime, date: false)
+        endTime = convert(endTime, date: false)
+        UserDefaults.standard.set(new, forKey: "germanDates")
+    }
 
     func selectProvider(_ value: ExtractionProvider) {
         cancel()
@@ -71,6 +92,12 @@ final class AppModel: ObservableObject {
         status = ""
     }
 
+    func receive(_ text: String, automatic: Bool) {
+        receive(text)
+        showsComposer = !automatic
+        if automatic { extract() }
+    }
+
     func cancel() {
         extraction?.cancel()
         generation = UUID()
@@ -82,23 +109,21 @@ final class AppModel: ObservableObject {
         endDate = presentation.display(draft.endDate, date: true)
         startTime = presentation.display(draft.startTime, date: false)
         endTime = presentation.display(draft.endTime, date: false)
-        reviewed = false
         saved = false
     }
 
     func extract() {
         cancel()
-        reviewed = false
         saved = false
         busy = true
         status = ""
         let input = source
         let selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let paidEnabled = allowPaidModels
         let selectedProvider = provider
         let selectedLocalModel = LocalModel(id: localModelID, provider: selectedProvider)
         let token = generation
         extraction = Task {
-            defer { if generation == token { busy = false } }
             do {
                 let result: EventDraft
                 if selectedProvider.isLocal {
@@ -106,15 +131,29 @@ final class AppModel: ObservableObject {
                     result = try await LocalModelClient().extract(text: input, model: selectedLocalModel)
                 } else {
                     let key = try Keychain.read()
-                    guard !key.isEmpty else { showSettings = true; throw DraftError("Save your own OpenRouter API key first.") }
-                    result = try await OpenRouterClient().extract(text: input, key: key, model: selectedModel)
+                    guard !key.isEmpty else { throw DraftError("Bitte zuerst den OpenRouter-API-Schlüssel in den Einstellungen speichern.") }
+                    result = try await OpenRouterClient().extract(text: input, key: key, model: selectedModel,
+                                                                  allowPaid: paidEnabled)
                 }
                 guard generation == token, !Task.isCancelled else { return }
-                draft = result
+                draft = EventExtraction.resolveDates(in: result, source: input)
                 syncFields()
-                status = "Review every field against the original text before saving."
+                showsComposer = false
+                status = ""
+                busy = false
+                extractionLog.info("Preview ready")
+                onExtractionFinished?()
             } catch is CancellationError { }
-            catch { if generation == token { status = error.localizedDescription } }
+            catch {
+                if generation == token {
+                    extractionLog.error("Preview unavailable")
+                    status = selectedProvider == .openRouter
+                        ? "\(error.localizedDescription) Gewähltes Modell: \(selectedModel)."
+                        : error.localizedDescription
+                    busy = false
+                    onExtractionFinished?()
+                }
+            }
         }
     }
 
@@ -129,7 +168,8 @@ final class AppModel: ObservableObject {
         return try value.validated()
     }
 
-    func loadCalendars() async {
+    @discardableResult
+    func loadCalendars() async -> Bool {
         do {
             // Full access is needed to list real calendars for the user's explicit choice.
             let granted = try await store.requestFullAccessToEvents()
@@ -139,13 +179,27 @@ final class AppModel: ObservableObject {
             if !calendars.contains(where: { $0.calendarIdentifier == calendarID }) {
                 calendarID = calendars.first(where: { $0.calendarIdentifier == store.defaultCalendarForNewEvents?.calendarIdentifier })?.calendarIdentifier ?? calendars.first?.calendarIdentifier ?? ""
             }
+            UserDefaults.standard.set(calendarID, forKey: "calendarID")
             status = calendars.isEmpty ? "No writable calendar is available. Add one in Calendar, then refresh." : "Choose the calendar below."
-        } catch { status = error.localizedDescription }
+            return !calendars.isEmpty
+        } catch { status = error.localizedDescription; return false }
+    }
+
+    func confirmAndSave() async {
+        guard !saved, !busy, !saving else { return }
+        saving = true
+        defer { saving = false }
+
+        // The first confirmation may also trigger macOS's Calendar permission prompt.
+        if EKEventStore.authorizationStatus(for: .event) != .fullAccess || calendarID.isEmpty || calendars.isEmpty {
+            guard await loadCalendars() else { return }
+        }
+        save()
     }
 
     func save() {
         do {
-            guard reviewed, !saved, !busy else { throw DraftError("Review the event before saving.") }
+            guard !saved, !busy else { throw DraftError("The event is not ready to save.") }
             let value = try currentEvent()
             guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {
                 throw DraftError("Connect Calendar first. If permission changed, reconnect it.")
@@ -164,7 +218,7 @@ final class AppModel: ObservableObject {
             event.notes = value.draft.notes
             try store.save(event, span: .thisEvent, commit: true)
             saved = true
-            status = "Event saved to \(calendar.title)."
+            status = "Termin in „\(calendar.title)“ gespeichert."
         } catch { status = error.localizedDescription }
     }
 }
