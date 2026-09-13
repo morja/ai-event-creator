@@ -112,6 +112,23 @@ final class AppModel: ObservableObject {
         saved = false
     }
 
+    func setAllDay(_ value: Bool) {
+        guard draft.allDay != value else { return }
+        let updated = draft.settingAllDay(value)
+        draft.allDay = updated.allDay
+
+        // Keep the user's edited dates and times. Fill only clocks that were empty.
+        if !value {
+            if startTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                startTime = presentation.display(updated.startTime, date: false)
+            }
+            if endTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                endTime = presentation.display(updated.endTime, date: false)
+            }
+            if endDate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { endDate = startDate }
+        }
+    }
+
     func extract() {
         cancel()
         saved = false
@@ -122,21 +139,24 @@ final class AppModel: ObservableObject {
         let paidEnabled = allowPaidModels
         let selectedProvider = provider
         let selectedLocalModel = LocalModel(id: localModelID, provider: selectedProvider)
+        let requestedAt = Date()
+        let displayZone = TimeZone.current
         let token = generation
         extraction = Task {
             do {
                 let result: EventDraft
                 if selectedProvider.isLocal {
                     guard localModels.contains(selectedLocalModel) else { throw DraftError("Refresh and choose an available local model first.") }
-                    result = try await LocalModelClient().extract(text: input, model: selectedLocalModel)
+                    result = try await LocalModelClient().extract(text: input, model: selectedLocalModel,
+                                                                  now: requestedAt, zone: displayZone)
                 } else {
-                    let key = try Keychain.read()
+                    let key = try OpenRouterCredential.read()
                     guard !key.isEmpty else { throw DraftError("Bitte zuerst den OpenRouter-API-Schlüssel in den Einstellungen speichern.") }
                     result = try await OpenRouterClient().extract(text: input, key: key, model: selectedModel,
-                                                                  allowPaid: paidEnabled)
+                                                                  allowPaid: paidEnabled, now: requestedAt, zone: displayZone)
                 }
                 guard generation == token, !Task.isCancelled else { return }
-                draft = EventExtraction.resolveDates(in: result, source: input)
+                draft = EventExtraction.resolveDates(in: result, source: input, now: requestedAt, zone: displayZone)
                 syncFields()
                 showsComposer = false
                 status = ""

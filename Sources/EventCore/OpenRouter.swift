@@ -42,8 +42,9 @@ public struct OpenRouterClient: Sendable {
         return request
     }
 
-    public func extract(text: String, key: String, model: String, allowPaid: Bool = false) async throws -> EventDraft {
-        let request = try Self.request(text: text, key: key, model: model, allowPaid: allowPaid)
+    public func extract(text: String, key: String, model: String, allowPaid: Bool = false,
+                        now: Date = Date(), zone: TimeZone = .current) async throws -> EventDraft {
+        let request = try Self.request(text: text, key: key, model: model, now: now, zone: zone, allowPaid: allowPaid)
         // Ephemeral storage avoids keeping selected text in disk caches. There are no automatic retries.
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }

@@ -19,9 +19,15 @@ public enum EventExtraction {
         Dates: YYYY-MM-DD, times: HH:mm, zone: IANA identifier. Never invent a missing day, month, title or time.
         When a day and month are explicit but the year is omitted, use the current calendar year in the default time zone.
         Do not flag that year as missing. Do not roll a past date into next year without an explicit indication.
-        Resolve an explicitly relative date against the current instant in the default zone, and explain it in uncertainties.
+        If the source explicitly names a time zone, interpret its dates and times in that source zone. For example,
+        PT means America/Los_Angeles with daylight saving on the event date, not the default zone. Resolve "today"
+        and "tomorrow" in the source zone. Return source wall times with that zone's IANA identifier; the app
+        converts them to the Mac's time zone for the preview. Use the default zone only when no source zone is given.
+        Explain relative dates in uncertainties.
         Missing/ambiguous fields must be empty strings and explained in uncertainties. Multiple candidate events: leave dates empty and request selection.
-        allDay is true only for an explicitly all-day event or an explicitly day-based range. Missing time alone is not all-day.
+        If the source contains no event time at all, set allDay to true. An ambiguous or invalid stated time is not all-day.
+        For a timed event, calculate the end time from an explicitly stated duration. Otherwise leave a missing
+        end time empty; the app will default it to one hour after the start.
         endDate for all-day events is the INCLUSIVE last day. For a single explicit all-day date, repeat startDate as endDate.
         For timed events with an explicit end time but no end date use the start date only if unambiguous; do not assume an overnight rollover.
         Ignore navigation, adverts, publication dates unrelated to the event. Preserve useful source details in notes, but do not fabricate URLs.
@@ -35,10 +41,19 @@ public enum EventExtraction {
         guard text.count <= 30000 else { throw DraftError("Select a shorter passage, at most 30,000 characters.") }
     }
 
-    /// Recover one explicit German date or day range when a model left both date fields empty.
-    /// More than one date expression stays unresolved rather than choosing the first one.
+    /// Recover a clear missing date, normalize an explicit source zone, then apply preview defaults.
     public static func resolveDates(in draft: EventDraft, source: String, now: Date = Date(),
                                     zone: TimeZone = .current) -> EventDraft {
+        let dated = resolveMissingDates(in: draft, source: source, now: now, zone: zone)
+        let normalized = SourceTimeZoneResolver.resolve(in: dated, source: source, now: now, destination: zone)
+        let timePattern = #"(?i)\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|0?[1-9])\s*(?:a\.?m\.?|p\.?m\.?)\b|\b(?:[01]?\d|2[0-3])(?:\.[0-5]\d)?\s*Uhr\b"#
+        let sourceHasTime = source.range(of: timePattern, options: .regularExpression) != nil
+        return normalized.withTimeDefaults(sourceHasTime: sourceHasTime)
+    }
+
+    /// More than one date expression stays unresolved rather than choosing the first one.
+    private static func resolveMissingDates(in draft: EventDraft, source: String, now: Date,
+                                            zone: TimeZone) -> EventDraft {
         guard draft.startDate.isEmpty, draft.endDate.isEmpty,
               !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !draft.uncertainties.contains(where: isMultipleEventsWarning) else { return draft }

@@ -21,6 +21,61 @@ public struct EventDraft: Codable, Sendable, Equatable {
 
     public init() {}
 
+    /// Apply predictable preview defaults only after source-zone times have been converted.
+    public func withTimeDefaults(sourceHasTime: Bool) -> EventDraft {
+        var result = self
+        guard !result.allDay else { return result }
+
+        if !sourceHasTime {
+            result.allDay = true
+            result.startTime = ""
+            result.endTime = ""
+            if result.endDate.isEmpty { result.endDate = result.startDate }
+            return result
+        }
+
+        guard !result.startTime.isEmpty, result.endTime.isEmpty,
+              let zone = TimeZone(identifier: result.timeZone) else { return result }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        guard let start = try? Self.date(result.startDate, time: result.startTime, calendar: calendar) else {
+            return result
+        }
+
+        let end = start.addingTimeInterval(3600)
+        (result.endDate, result.endTime) = Self.fields(for: end, calendar: calendar)
+
+        // A repeated wall time at the autumn clock change cannot be represented
+        // unambiguously in one local time zone. UTC preserves the exact hour.
+        if (try? Self.date(result.endDate, time: result.endTime, calendar: calendar)) == nil {
+            calendar.timeZone = TimeZone(identifier: "UTC")!
+            result.timeZone = "UTC"
+            (result.startDate, result.startTime) = Self.fields(for: start, calendar: calendar)
+            (result.endDate, result.endTime) = Self.fields(for: end, calendar: calendar)
+            result.uncertainties.append("Wegen der Zeitumstellung wird dieser Termin in UTC angezeigt, damit die einstündige Dauer eindeutig bleibt.")
+        }
+
+        result.uncertainties.removeAll { warning in
+            let lower = warning.lowercased()
+            return ((lower.contains("end time") && (lower.contains("not specified") || lower.contains("missing"))) ||
+                    (lower.contains("endzeit") && (lower.contains("fehlt") || lower.contains("nicht angegeben"))))
+        }
+        return result
+    }
+
+    public func settingAllDay(_ value: Bool) -> EventDraft {
+        var result = self
+        guard result.allDay != value else { return result }
+        result.allDay = value
+        if !value {
+            if result.startTime.isEmpty { result.startTime = "09:00" }
+            if result.endTime.isEmpty { result.endTime = "10:00" }
+            if result.endDate.isEmpty { result.endDate = result.startDate }
+        }
+        return result
+    }
+
     public func validated() throws -> ValidatedEvent {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw DraftError("Please enter an event title.")
@@ -72,6 +127,12 @@ public struct EventDraft: Codable, Sendable, Equatable {
             }
         }
         return date
+    }
+
+    private static func fields(for date: Date, calendar: Calendar) -> (String, String) {
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        return (String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0),
+                String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0))
     }
 }
 

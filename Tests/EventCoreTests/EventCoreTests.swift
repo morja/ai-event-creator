@@ -19,6 +19,65 @@ final class EventCoreTests: XCTestCase {
         XCTAssertEqual(Keychain.query[kSecAttrService as String] as? String, Keychain.service)
     }
 
+    func testDevelopmentCredentialTakesPrecedenceWithoutKeychainAccess() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aieventextractor-key-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("sk-or-v1-test-placeholder\n".utf8).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+
+        var fallbackCalled = false
+        let key = try OpenRouterCredential.read(fileURL: file) {
+            fallbackCalled = true
+            return "keychain-placeholder"
+        }
+
+        XCTAssertEqual(key, "sk-or-v1-test-placeholder")
+        XCTAssertFalse(fallbackCalled)
+    }
+
+    func testMissingDevelopmentFileUsesKeychainFallback() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aieventextractor-missing-key-\(UUID().uuidString)")
+        var fallbackCalled = false
+
+        let key = try OpenRouterCredential.read(fileURL: missing) {
+            fallbackCalled = true
+            return "keychain-placeholder"
+        }
+
+        XCTAssertEqual(key, "keychain-placeholder")
+        XCTAssertTrue(fallbackCalled)
+    }
+
+    func testInsecureDevelopmentFileFailsWithoutKeychainFallback() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aieventextractor-insecure-key-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("test-placeholder".utf8).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+
+        var fallbackCalled = false
+        XCTAssertThrowsError(try OpenRouterCredential.read(fileURL: file) {
+            fallbackCalled = true
+            return "keychain-placeholder"
+        })
+        XCTAssertFalse(fallbackCalled)
+    }
+
+    func testDevelopmentCredentialFileOnThisMacIsReadable() throws {
+        let file = OpenRouterCredential.developmentFileURL
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("No local development key file on this Mac.")
+        }
+
+        // Intentionally assert only a boolean. Never print or snapshot the key.
+        let available = !(try OpenRouterCredential.read(fileURL: file) {
+            throw DraftError("Unexpected Keychain fallback")
+        }).isEmpty
+        XCTAssertTrue(available)
+    }
+
     func draft() -> EventDraft {
         var d = EventDraft()
         d.title = "Team meeting"
@@ -148,6 +207,220 @@ final class EventCoreTests: XCTestCase {
         XCTAssertEqual(result.endDate, "2026-09-20")
         XCTAssertTrue(result.uncertainties.isEmpty)
         XCTAssertNoThrow(try result.validated())
+    }
+
+    func testPacificTimeInSourceConvertsToLocalPreviewAndCalendarInstant() throws {
+        var extracted = EventDraft()
+        extracted.title = "With Gangaji live online gathering"
+        extracted.startDate = "2026-09-13"
+        extracted.endDate = "2026-09-13"
+        extracted.startTime = "11:00"
+        extracted.endTime = "12:00"
+        extracted.timeZone = "Europe/Berlin"
+        let zone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-13T18:00:41Z"))
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "With Gangaji live online gathering. Today at 11:00 AM PT, ends at 12:00 PM PT.",
+            now: now, zone: zone)
+
+        XCTAssertEqual(result.startDate, "2026-09-13")
+        XCTAssertEqual(result.startTime, "20:00")
+        XCTAssertEqual(result.endTime, "21:00")
+        XCTAssertEqual(result.timeZone, "Europe/Berlin")
+        XCTAssertEqual(ISO8601DateFormatter().string(from: try result.validated().start), "2026-09-13T18:00:00Z")
+    }
+
+    func testMissingEndTimeDefaultsToOneHourAfterPacificConversion() throws {
+        var extracted = EventDraft()
+        extracted.title = "With Gangaji live online gathering"
+        extracted.startDate = "2026-09-13"
+        extracted.endDate = "2026-09-13"
+        extracted.startTime = "11:00"
+        extracted.timeZone = "Europe/Berlin"
+        let zone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-13T18:00:41Z"))
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "With Gangaji live online gathering. Today at 11:00 AM PT.",
+            now: now, zone: zone)
+
+        XCTAssertEqual(result.startTime, "20:00")
+        XCTAssertEqual(result.endDate, "2026-09-13")
+        XCTAssertEqual(result.endTime, "21:00")
+        XCTAssertEqual(try result.validated().end.timeIntervalSince(result.validated().start), 3600)
+    }
+
+    func testNoTimeBecomesAllDayAndCanSwitchToNineOClock() throws {
+        var extracted = EventDraft()
+        extracted.title = "Workshop"
+        extracted.startDate = "2026-09-18"
+        extracted.startTime = "14:00" // A model may invent a clock time despite the source having none.
+        extracted.endTime = "15:00"
+        extracted.timeZone = "Europe/Berlin"
+
+        let result = EventExtraction.resolveDates(in: extracted, source: "Workshop am 18. September 2026")
+        XCTAssertTrue(result.allDay)
+        XCTAssertEqual(result.endDate, "2026-09-18")
+        XCTAssertEqual(result.startTime, "")
+        XCTAssertEqual(result.endTime, "")
+        XCTAssertEqual(try result.validated().end.timeIntervalSince(result.validated().start), 86400)
+
+        let timed = result.settingAllDay(false)
+        XCTAssertEqual(timed.startTime, "09:00")
+        XCTAssertEqual(timed.endTime, "10:00")
+        XCTAssertEqual(try timed.validated().end.timeIntervalSince(timed.validated().start), 3600)
+    }
+
+    @MainActor
+    func testTurningOffAllDayFillsVisibleFieldsWithoutReplacingDates() throws {
+        let model = AppModel()
+        model.germanDates = true
+        model.draft.title = "Workshop"
+        model.draft.startDate = "2026-09-18"
+        model.draft.endDate = "2026-09-18"
+        model.draft.timeZone = "Europe/Berlin"
+        model.draft.allDay = true
+        model.syncFields()
+
+        model.setAllDay(false)
+
+        XCTAssertFalse(model.draft.allDay)
+        XCTAssertEqual(model.startDate, "18.09.2026")
+        XCTAssertEqual(model.startTime, "09:00")
+        XCTAssertEqual(model.endTime, "10:00")
+        XCTAssertEqual(try model.currentEvent().end.timeIntervalSince(model.currentEvent().start), 3600)
+    }
+
+    func testOneHourDefaultCrossesMidnightAndDaylightSavingGap() throws {
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+
+        var overnight = draft()
+        overnight.startTime = "23:30"
+        overnight.endTime = ""
+        let nextDay = EventExtraction.resolveDates(in: overnight, source: "Meeting at 23:30", zone: berlin)
+        XCTAssertEqual(nextDay.endDate, "2026-09-14")
+        XCTAssertEqual(nextDay.endTime, "00:30")
+        XCTAssertEqual(try nextDay.validated().end.timeIntervalSince(nextDay.validated().start), 3600)
+
+        var spring = draft()
+        spring.startDate = "2026-03-29"
+        spring.startTime = "01:30"
+        spring.endTime = ""
+        let afterGap = EventExtraction.resolveDates(in: spring, source: "Meeting at 01:30", zone: berlin)
+        XCTAssertEqual(afterGap.endDate, "2026-03-29")
+        XCTAssertEqual(afterGap.endTime, "03:30")
+        XCTAssertEqual(try afterGap.validated().end.timeIntervalSince(afterGap.validated().start), 3600)
+
+        var autumn = draft()
+        autumn.startDate = "2026-10-25"
+        autumn.startTime = "01:30"
+        autumn.endTime = ""
+        let repeatedHour = EventExtraction.resolveDates(in: autumn, source: "Meeting at 01:30", zone: berlin)
+        XCTAssertEqual(repeatedHour.timeZone, "UTC")
+        XCTAssertEqual(try repeatedHour.validated().end.timeIntervalSince(repeatedHour.validated().start), 3600)
+    }
+
+    func testUnresolvedExplicitTimeDoesNotBecomeAllDay() throws {
+        var extracted = EventDraft()
+        extracted.title = "Meeting"
+        extracted.startDate = "2026-10-25"
+        extracted.endDate = extracted.startDate
+        extracted.timeZone = "Europe/Berlin"
+        extracted.uncertainties = ["The stated time is ambiguous at the clock change."]
+
+        let result = EventExtraction.resolveDates(in: extracted, source: "Meeting at 02:30", zone: TimeZone(identifier: "Europe/Berlin")!)
+        XCTAssertFalse(result.allDay)
+        XCTAssertTrue(result.startTime.isEmpty)
+
+        let german = EventExtraction.resolveDates(in: extracted, source: "Treffen um 9.30 Uhr",
+            zone: TimeZone(identifier: "Europe/Berlin")!)
+        XCTAssertFalse(german.allDay)
+    }
+
+    func testPacificTodayUsesSourceCalendarAndCanCrossLocalMidnight() throws {
+        var extracted = draft()
+        extracted.startDate = "2026-09-14" // The model incorrectly resolved "today" in Berlin.
+        extracted.endDate = extracted.startDate
+        extracted.startTime = "20:00"
+        extracted.endTime = "21:00"
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-14T05:00:00Z"))
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "Today at 8:00 PM PT to 9:00 PM PT", now: now, zone: berlin)
+
+        XCTAssertEqual(result.startDate, "2026-09-14")
+        XCTAssertEqual(result.startTime, "05:00")
+        XCTAssertEqual(result.endDate, "2026-09-14")
+        XCTAssertEqual(result.endTime, "06:00")
+        XCTAssertEqual(ISO8601DateFormatter().string(from: try result.validated().start), "2026-09-14T03:00:00Z")
+    }
+
+    func testPacificDaylightOffsetDiffersFromWinterAndExplicitPST() throws {
+        var extracted = draft()
+        extracted.startDate = "2026-03-15"
+        extracted.endDate = extracted.startDate
+        extracted.startTime = "11:00"
+        extracted.endTime = "12:00"
+        extracted.timeZone = "America/Los_Angeles"
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-15T12:00:00Z"))
+
+        let pacific = EventExtraction.resolveDates(in: extracted,
+            source: "March 15, 11:00 AM PT to 12:00 PM PT", now: now, zone: berlin)
+        XCTAssertEqual(pacific.startTime, "19:00")
+        XCTAssertEqual(pacific.endTime, "20:00")
+
+        let standard = EventExtraction.resolveDates(in: extracted,
+            source: "March 15, 11:00 AM PST to 12:00 PM PST", now: now, zone: berlin)
+        XCTAssertEqual(standard.startTime, "20:00")
+        XCTAssertEqual(standard.endTime, "21:00")
+    }
+
+    func testAlreadyConvertedOrUnzonedTimeIsNotShiftedAgain() throws {
+        var extracted = draft()
+        extracted.startTime = "20:00"
+        extracted.endTime = "21:00"
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-13T18:00:00Z"))
+
+        XCTAssertEqual(EventExtraction.resolveDates(in: extracted,
+            source: "Today at 11:00 AM PT to 12:00 PM PT", now: now, zone: berlin), extracted)
+        XCTAssertEqual(EventExtraction.resolveDates(in: extracted,
+            source: "Today at 20:00", now: now, zone: berlin), extracted)
+    }
+
+    func testPacificTimeInParenthesesResolvesMissingRelativeDate() throws {
+        var extracted = EventDraft()
+        extracted.title = "Online meeting"
+        extracted.startTime = "11:00"
+        extracted.timeZone = "Europe/Berlin"
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-13T18:00:00Z"))
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "Today at 11:00 AM (PT)", now: now, zone: berlin)
+
+        XCTAssertEqual(result.startDate, "2026-09-13")
+        XCTAssertEqual(result.startTime, "20:00")
+        XCTAssertEqual(result.endDate, "2026-09-13")
+    }
+
+    func testRepeatedPacificWallTimeRequiresCorrection() throws {
+        var extracted = draft()
+        extracted.startDate = "2026-11-01"
+        extracted.endDate = extracted.startDate
+        extracted.startTime = "01:30"
+        extracted.endTime = "02:30"
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-31T12:00:00Z"))
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "November 1 at 1:30 AM PT to 2:30 AM PT", now: now, zone: berlin)
+
+        XCTAssertTrue(result.startTime.isEmpty)
+        XCTAssertTrue(result.uncertainties.contains { $0.contains("Zeitumstellung") })
     }
 
     func testExplicitYearIsRecoveredButAmbiguousOrInvalidDatesAreNot() {

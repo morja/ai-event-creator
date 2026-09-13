@@ -2,7 +2,7 @@ import Foundation
 import Security
 import EventCore
 
-/// Only this app's credential is queried. No imports from other tools or config files.
+/// Fallback credential for installations without the local development file.
 enum Keychain {
     static let service = "org.aieventextractor.mac.openrouter"
     static let account = "api-key"

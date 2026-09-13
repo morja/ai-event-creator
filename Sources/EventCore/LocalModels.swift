@@ -147,8 +147,9 @@ public struct LocalModelClient: Sendable {
         return request
     }
 
-    public func extract(text: String, model: LocalModel) async throws -> EventDraft {
-        let request = try Self.request(text: text, model: model)
+    public func extract(text: String, model: LocalModel, now: Date = Date(),
+                        zone: TimeZone = .current) async throws -> EventDraft {
+        let request = try Self.request(text: text, model: model, now: now, zone: zone)
         let session = session()
         defer { session.invalidateAndCancel() }
         do {

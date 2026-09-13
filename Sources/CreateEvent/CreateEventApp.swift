@@ -44,15 +44,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showWindow() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 590),
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+            let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 750)
+            let width = min(760, visible.width - 32)
+            let height = min(820, visible.height - 44)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                   backing: .buffered, defer: false)
             window.title = "AIEventExtractor"
             window.contentView = NSHostingView(rootView: ContentView(model: model))
-            window.minSize = NSSize(width: 580, height: 460)
+            window.minSize = NSSize(width: min(580, width), height: min(460, height))
             window.isReleasedWhenClosed = false
             window.delegate = self
-            window.center()
+            let frame = window.frame
+            window.setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2,
+                                          y: visible.midY - frame.height / 2))
             self.window = window
         }
         window?.makeKeyAndOrderFront(nil)
@@ -94,12 +100,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @State private var detailsExpanded = true
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("AIEventExtractor").font(.title2.weight(.semibold))
+                    Text(isPreview ? "Terminvorschau" : "AIEventExtractor")
+                        .font(.title2.weight(.semibold))
                     Spacer()
                     Button("Einstellungen…") { model.showSettings = true }
                 }
@@ -116,10 +124,15 @@ struct ContentView: View {
                     preview
                 }
             }
-            .padding(24)
+            .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
+        .onChange(of: model.source) { _, _ in detailsExpanded = true }
+    }
+
+    private var isPreview: Bool {
+        !model.saved && !model.showsComposer && !model.busy && !model.draft.title.isEmpty
     }
 
     private var composer: some View {
@@ -186,9 +199,7 @@ struct ContentView: View {
     }
 
     private var preview: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            Text("Terminvorschau").font(.title3.weight(.medium))
-
+        VStack(alignment: .leading, spacing: 10) {
             if !model.draft.uncertainties.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(Array(model.draft.uncertainties.enumerated()), id: \.offset) { _, warning in
@@ -204,21 +215,28 @@ struct ContentView: View {
                 .font(.title2)
                 .textFieldStyle(.roundedBorder)
 
-            Toggle("Ganztägig", isOn: $model.draft.allDay)
+            Toggle("Ganztägig", isOn: Binding(
+                get: { model.draft.allDay },
+                set: { model.setAllDay($0) }
+            ))
 
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                 GridRow {
                     Text("Beginn")
                     HStack {
-                        TextField(model.presentation.dateHint, text: $model.startDate)
-                        if !model.draft.allDay { TextField(model.presentation.timeHint, text: $model.startTime) }
+                        PreviewPickerField(text: $model.startDate, presentation: model.presentation, date: true)
+                        if !model.draft.allDay {
+                            PreviewPickerField(text: $model.startTime, presentation: model.presentation, date: false)
+                        }
                     }
                 }
                 GridRow {
                     Text(model.draft.allDay ? "Letzter Tag" : "Ende")
                     HStack {
-                        TextField(model.presentation.dateHint, text: $model.endDate)
-                        if !model.draft.allDay { TextField(model.presentation.timeHint, text: $model.endTime) }
+                        PreviewPickerField(text: $model.endDate, presentation: model.presentation, date: true)
+                        if !model.draft.allDay {
+                            PreviewPickerField(text: $model.endTime, presentation: model.presentation, date: false)
+                        }
                     }
                 }
                 GridRow {
@@ -228,26 +246,31 @@ struct ContentView: View {
             }
             .textFieldStyle(.roundedBorder)
 
-            DisclosureGroup("Weitere Angaben") {
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField("Zeitzone", text: $model.draft.timeZone)
-                        .textFieldStyle(.roundedBorder)
+            DisclosureGroup("Weitere Angaben", isExpanded: $detailsExpanded) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("Zeitzone")
+                        TextField("Europe/Berlin", text: $model.draft.timeZone)
+                            .textFieldStyle(.roundedBorder)
+                    }
                     Text("Notizen").font(.callout)
                     TextEditor(text: $model.draft.notes)
-                        .frame(height: 75)
+                        .frame(height: 58)
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                    Picker("Kalender", selection: $model.calendarID) {
-                        Text("Standardkalender").tag("")
-                        ForEach(model.calendars, id: \.calendarIdentifier) { calendar in
-                            Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
+                    HStack {
+                        Picker("Kalender", selection: $model.calendarID) {
+                            Text("Standardkalender").tag("")
+                            ForEach(model.calendars, id: \.calendarIdentifier) { calendar in
+                                Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
+                            }
                         }
+                        Button("Aktualisieren") { Task { await model.loadCalendars() } }
                     }
-                    Button("Kalender aktualisieren") { Task { await model.loadCalendars() } }
                     DisclosureGroup("Originaltext") {
                         Text(model.source).textSelection(.enabled).font(.callout)
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 5)
             }
 
             if !model.status.isEmpty { Text(model.status).font(.callout).textSelection(.enabled) }
@@ -270,12 +293,85 @@ struct ContentView: View {
     }
 }
 
+/// A native picker complements manual entry. UTC is only an internal picker anchor;
+/// the text remains a civil date or clock time in the event's chosen time zone.
+private struct PreviewPickerField: View {
+    @Binding var text: String
+    let presentation: DatePresentation
+    let date: Bool
+    @State private var pickerOpen = false
+
+    private var utc: TimeZone { TimeZone(secondsFromGMT: 0)! }
+
+    private var formatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = utc
+        formatter.dateFormat = date ? "yyyy-MM-dd" : "HH:mm"
+        return formatter
+    }
+
+    private var selection: Binding<Date> {
+        Binding(
+            get: {
+                if let wire = try? presentation.wire(text, date: date),
+                   let value = formatter.date(from: wire) { return value }
+                if !date { return formatter.date(from: "09:00")! }
+
+                // Opening an empty date picker starts at today's local civil date.
+                let today = DateFormatter()
+                today.locale = Locale(identifier: "en_US_POSIX")
+                today.timeZone = .current
+                today.dateFormat = "yyyy-MM-dd"
+                return formatter.date(from: today.string(from: Date())) ?? Date()
+            },
+            set: { text = presentation.display(formatter.string(from: $0), date: date) }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            TextField(date ? presentation.dateHint : presentation.timeHint, text: $text)
+                .textFieldStyle(.roundedBorder)
+            Button { pickerOpen = true } label: {
+                Image(systemName: date ? "calendar" : "clock")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(date ? "Datum auswählen" : "Uhrzeit auswählen")
+            .popover(isPresented: $pickerOpen) {
+                if date {
+                    DatePicker("Datum", selection: selection, displayedComponents: .date)
+                        .datePickerStyle(.graphical)
+                        .environment(\.locale, presentation.locale)
+                        .environment(\.timeZone, utc)
+                        .padding(12)
+                } else {
+                    DatePicker("Uhrzeit", selection: selection, displayedComponents: .hourAndMinute)
+                        .environment(\.locale, presentation.locale)
+                        .environment(\.timeZone, utc)
+                        .padding(12)
+                }
+            }
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) var dismiss
     @State private var key = ""
     @State private var message = ""
     @State private var configured = false
+
+    private var developmentFilePresent: Bool {
+        FileManager.default.fileExists(atPath: OpenRouterCredential.developmentFileURL.path)
+    }
+
+    private func refreshCredentialStatus() {
+        do { configured = !(try OpenRouterCredential.read()).isEmpty }
+        catch { message = error.localizedDescription }
+    }
 
     var body: some View {
         ScrollView {
@@ -300,22 +396,27 @@ struct SettingsView: View {
                     if !model.modelStatus.isEmpty { Text(model.modelStatus).font(.callout).foregroundStyle(.secondary) }
                 } else {
                     Link("OpenRouter-API-Schlüssel erstellen", destination: URL(string: "https://openrouter.ai/settings/keys")!)
-                    SecureField(configured ? "Neuen API-Schlüssel eingeben" : "API-Schlüssel", text: $key)
-                        .textFieldStyle(.roundedBorder)
-                    HStack {
-                        Button("Schlüssel speichern") {
-                            do {
-                                let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !value.isEmpty else { throw DraftError("Bitte einen Schlüssel eingeben.") }
-                                try Keychain.save(value)
-                                key = ""
-                                configured = true
-                                message = "Schlüssel im Schlüsselbund gespeichert."
-                            } catch { message = error.localizedDescription }
-                        }
-                        Button("Schlüssel löschen") {
-                            do { try Keychain.save(""); configured = false; message = "Schlüssel gelöscht." }
-                            catch { message = error.localizedDescription }
+                    if developmentFilePresent {
+                        Text("Lokale Entwicklungsdatei gefunden: ~/.config/send-to-hammerspoon/openrouter-api-key. Die App liest sie zuerst; der Schlüsselbund wird dabei nicht geöffnet.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        SecureField(configured ? "Neuen API-Schlüssel eingeben" : "API-Schlüssel", text: $key)
+                            .textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("Schlüssel speichern") {
+                                do {
+                                    let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    guard !value.isEmpty else { throw DraftError("Bitte einen Schlüssel eingeben.") }
+                                    try Keychain.save(value)
+                                    key = ""
+                                    configured = true
+                                    message = "Schlüssel im Schlüsselbund gespeichert."
+                                } catch { message = error.localizedDescription }
+                            }
+                            Button("Schlüssel löschen") {
+                                do { try Keychain.save(""); configured = false; message = "Schlüssel gelöscht." }
+                                catch { message = error.localizedDescription }
+                            }
                         }
                     }
                     TextField("OpenRouter-Modell", text: $model.model)
@@ -364,7 +465,10 @@ struct SettingsView: View {
             .padding(24)
         }
         .frame(width: 570, height: 580)
-        .onChange(of: model.provider) { _, value in model.selectProvider(value) }
+        .onChange(of: model.provider) { _, value in
+            model.selectProvider(value)
+            if value == .openRouter { refreshCredentialStatus() }
+        }
         .onChange(of: model.localModelID) { _, value in
             UserDefaults.standard.set(value, forKey: "localModel.\(model.provider.rawValue)")
         }
@@ -375,9 +479,8 @@ struct SettingsView: View {
             model.changeDatePreference(from: old, to: new)
         }
         .task {
-            do { configured = !(try Keychain.read()).isEmpty }
-            catch { message = error.localizedDescription }
             if model.provider.isLocal { await model.discoverLocalModels() }
+            else { refreshCredentialStatus() }
         }
     }
 }
