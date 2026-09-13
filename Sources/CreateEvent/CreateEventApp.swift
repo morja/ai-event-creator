@@ -96,11 +96,34 @@ struct ContentView: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
                     .disabled(model.busy)
                     .accessibilityLabel("Original event text")
-                Text("Extract sends this text to OpenRouter and its model provider. Their retention and training policies may differ. Your Calendar contents are never sent. Check the text before continuing.")
-                    .font(.callout).foregroundStyle(.secondary)
+                Picker("Extraction", selection: $model.provider) {
+                    ForEach(ExtractionProvider.allCases, id: \.self) { provider in
+                        Text(provider.name).tag(provider)
+                    }
+                }.disabled(model.busy)
+                if model.provider.isLocal {
+                    HStack {
+                        Picker("Local model", selection: $model.localModelID) {
+                            Text("Choose a model…").tag("")
+                            ForEach(model.localModels) { local in Text(local.id).tag(local.id) }
+                        }
+                        Button("Refresh models") { Task { await model.discoverLocalModels() } }
+                            .disabled(model.discovering || model.busy)
+                        if model.discovering { ProgressView().controlSize(.small) }
+                    }
+                    if !model.modelStatus.isEmpty {
+                        Text(model.modelStatus).font(.callout).foregroundStyle(.secondary)
+                    }
+                    Text("The request goes to \(model.provider.name) at 127.0.0.1. Start its local server first. No OpenRouter fallback occurs. Check that the server itself uses a local model.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Text("Extract sends this text to OpenRouter and its model provider. Their retention and training policies may differ. Your Calendar contents are never sent.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 HStack {
-                    Button("Extract with OpenRouter") { model.extract() }
-                        .buttonStyle(.borderedProminent).disabled(model.busy || model.source.isEmpty)
+                    Button(model.provider.isLocal ? "Extract locally" : "Extract with OpenRouter") { model.extract() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.busy || model.source.isEmpty || (model.provider.isLocal && model.localModelID.isEmpty))
                     if model.busy {
                         ProgressView().controlSize(.small)
                         Button("Cancel") { model.cancel() }
@@ -174,6 +197,11 @@ struct ContentView: View {
         .onChange(of: model.endDate) { model.reviewed = false }
         .onChange(of: model.startTime) { model.reviewed = false }
         .onChange(of: model.endTime) { model.reviewed = false }
+        .onChange(of: model.provider) { _, value in model.selectProvider(value) }
+        .onChange(of: model.localModelID) { _, value in
+            UserDefaults.standard.set(value, forKey: "localModel.\(model.provider.rawValue)")
+        }
+        .task { if model.provider.isLocal { await model.discoverLocalModels() } }
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
     }
 }
@@ -214,7 +242,7 @@ struct SettingsView: View {
             Toggle("German dates and 24-hour times", isOn: $model.germanDates)
             Text("Changing this preference clears the editable date/time fields. Re-extract or re-enter them in the new format.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("Selected text is transmitted only when you press Extract. OpenRouter and the selected provider process it under their own policies. The app keeps drafts in memory and does not log selected text or API keys.")
+            Text("Only pressing Extract sends selected text to the chosen extraction provider. Local mode uses a server on this Mac. The app keeps drafts in memory and does not log text or keys.")
             HStack {
                 Link("OpenRouter privacy policy", destination: URL(string: "https://openrouter.ai/privacy")!)
                 Spacer()

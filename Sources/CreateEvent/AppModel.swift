@@ -19,12 +19,49 @@ final class AppModel: ObservableObject {
     @Published var calendarID = ""
     @Published var showSettings = false
     @Published var model = UserDefaults.standard.string(forKey: "model") ?? "openrouter/free"
+    @Published var provider = ExtractionProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "") ?? .openRouter
+    @Published var localModels: [LocalModel] = []
+    @Published var localModelID = ""
+    @Published var discovering = false
+    @Published var modelStatus = ""
     @Published var germanDates = UserDefaults.standard.object(forKey: "germanDates") as? Bool ?? (Locale.current.language.languageCode?.identifier == "de")
     private let store = EKEventStore()
     private var extraction: Task<Void, Never>?
     private var generation = UUID()
+    private var discoveryGeneration = UUID()
 
     var presentation: DatePresentation { DatePresentation(locale: germanDates ? Locale(identifier: "de_DE") : .current) }
+
+    func selectProvider(_ value: ExtractionProvider) {
+        cancel()
+        provider = value
+        localModels = []
+        discoveryGeneration = UUID()
+        localModelID = UserDefaults.standard.string(forKey: "localModel.\(value.rawValue)") ?? ""
+        UserDefaults.standard.set(value.rawValue, forKey: "provider")
+        status = ""
+        modelStatus = ""
+        if value.isLocal { Task { await discoverLocalModels() } }
+    }
+
+    func discoverLocalModels() async {
+        guard provider.isLocal else { return }
+        let requested = provider
+        discoveryGeneration = UUID()
+        let token = discoveryGeneration
+        discovering = true
+        localModels = []
+        modelStatus = "Checking \(requested.name) models…"
+        defer { if discoveryGeneration == token { discovering = false } }
+        do {
+            let models = try await LocalModelClient().discover(requested)
+            guard discoveryGeneration == token, provider == requested else { return }
+            localModels = models
+            if !models.contains(where: { $0.id == localModelID }) { localModelID = models.first?.id ?? "" }
+            modelStatus = models.isEmpty ? "No usable models found in \(requested.name). Check the model download and server, then refresh." : "Found \(models.count) \(requested.name) model(s)."
+        } catch is CancellationError { }
+        catch { if discoveryGeneration == token { modelStatus = error.localizedDescription } }
+    }
 
     func receive(_ text: String) {
         cancel()
@@ -57,13 +94,21 @@ final class AppModel: ObservableObject {
         status = ""
         let input = source
         let selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedProvider = provider
+        let selectedLocalModel = LocalModel(id: localModelID, provider: selectedProvider)
         let token = generation
         extraction = Task {
             defer { if generation == token { busy = false } }
             do {
-                let key = try Keychain.read()
-                guard !key.isEmpty else { showSettings = true; throw DraftError("Save your own OpenRouter API key first.") }
-                let result = try await OpenRouterClient().extract(text: input, key: key, model: selectedModel)
+                let result: EventDraft
+                if selectedProvider.isLocal {
+                    guard localModels.contains(selectedLocalModel) else { throw DraftError("Refresh and choose an available local model first.") }
+                    result = try await LocalModelClient().extract(text: input, model: selectedLocalModel)
+                } else {
+                    let key = try Keychain.read()
+                    guard !key.isEmpty else { showSettings = true; throw DraftError("Save your own OpenRouter API key first.") }
+                    result = try await OpenRouterClient().extract(text: input, key: key, model: selectedModel)
+                }
                 guard generation == token, !Task.isCancelled else { return }
                 draft = result
                 syncFields()

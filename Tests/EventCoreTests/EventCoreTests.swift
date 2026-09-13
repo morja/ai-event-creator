@@ -126,4 +126,71 @@ final class EventCoreTests: XCTestCase {
             }
         }
     }
+
+    func testLocalDiscoveryParsesOnlyFixedProviderResponses() throws {
+        let ollama = Data(#"{"models":[{"name":"gemma3:4b"},{"name":"qwen:3b"}]}"#.utf8)
+        let studio = Data(#"{"data":[{"id":"local/qwen"},{"id":"local/other"}]}"#.utf8)
+        XCTAssertEqual(try LocalModelClient.decodeModels(ollama, provider: .ollama).map(\.id), ["gemma3:4b", "qwen:3b"])
+        XCTAssertEqual(try LocalModelClient.decodeModels(studio, provider: .lmStudio).map(\.id), ["local/other", "local/qwen"])
+        XCTAssertEqual(LocalModelClient.discoveryURL(for: .ollama)?.absoluteString, "http://127.0.0.1:11434/api/tags")
+        XCTAssertEqual(LocalModelClient.discoveryURL(for: .lmStudio)?.absoluteString, "http://127.0.0.1:1234/v1/models")
+        XCTAssertNil(LocalModelClient.discoveryURL(for: .openRouter))
+        XCTAssertThrowsError(try LocalModelClient.decodeModels(Data("bad".utf8), provider: .ollama))
+        let usable = Data(#"{"capabilities":["completion","vision"]}"#.utf8)
+        XCTAssertTrue(LocalModelClient.supportsChat(usable, status: 200))
+        XCTAssertFalse(LocalModelClient.supportsChat(usable, status: 404))
+        XCTAssertFalse(LocalModelClient.supportsChat(Data(#"{"capabilities":["embedding"]}"#.utf8), status: 200))
+    }
+
+    func testLocalRequestsHaveNoCloudCredentialsOrFallback() throws {
+        for provider in [ExtractionProvider.ollama, .lmStudio] {
+            let model = LocalModel(id: "gemma3:4b", provider: provider)
+            let request = try LocalModelClient.request(text: "Meeting tomorrow", model: model)
+            XCTAssertEqual(request.url?.host, "127.0.0.1")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            XCTAssertEqual(body["model"] as? String, "gemma3:4b")
+            XCTAssertEqual(body["stream"] as? Bool, false)
+            XCTAssertNil(body["provider"])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            XCTAssertEqual(messages.last?["content"], "Meeting tomorrow")
+            XCTAssertFalse(messages.first?["content"]?.contains("Meeting tomorrow") ?? true)
+            if provider == .ollama { XCTAssertNotNil(body["format"]) }
+            else { XCTAssertNotNil(body["response_format"]) }
+        }
+        XCTAssertThrowsError(try LocalModelClient.request(text: "x", model: LocalModel(id: "", provider: .ollama)))
+        XCTAssertThrowsError(try LocalModelClient.request(text: "", model: LocalModel(id: "gemma3:4b", provider: .ollama)))
+    }
+
+    func testLocalResponsesRequireFinishedStructuredAnswer() throws {
+        let content = String(data: try JSONEncoder().encode(draft()), encoding: .utf8)!
+        let ollama = try JSONSerialization.data(withJSONObject: ["message": ["content": content], "done": true, "done_reason": "stop"])
+        let studio = try response(content)
+        XCTAssertEqual(try LocalModelClient.decode(ollama, status: 200, provider: .ollama), draft())
+        XCTAssertEqual(try LocalModelClient.decode(studio, status: 200, provider: .lmStudio), draft())
+        XCTAssertThrowsError(try LocalModelClient.decode(ollama, status: 302, provider: .ollama))
+        let missing = Data(#"{"error":"\"gemma3:4b\" does not support chat"}"#.utf8)
+        XCTAssertThrowsError(try LocalModelClient.decode(missing, status: 400, provider: .ollama)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("cannot open it for chat"))
+        }
+        XCTAssertThrowsError(try LocalModelClient.decode(try response("{}"), status: 200, provider: .lmStudio))
+        let unfinished = try JSONSerialization.data(withJSONObject: ["message": ["content": content], "done": false])
+        XCTAssertThrowsError(try LocalModelClient.decode(unfinished, status: 200, provider: .ollama))
+        for provider in [ExtractionProvider.ollama, .lmStudio] {
+            XCTAssertThrowsError(try LocalModelClient.decode(Data("private text".utf8), status: 500, provider: provider)) { error in
+                XCTAssertFalse(error.localizedDescription.contains("private text"))
+            }
+        }
+    }
+
+    func testOptionalOllamaSmoke() async throws {
+        guard let model = ProcessInfo.processInfo.environment["OLLAMA_SMOKE_MODEL"], !model.isEmpty else {
+            throw XCTSkip("Set OLLAMA_SMOKE_MODEL to test a running local Ollama server.")
+        }
+        let text = "Title: Team meeting. Date: 2026-10-15. Time: 14:00 to 15:00. Time zone: Europe/Berlin."
+        let result = try await LocalModelClient().extract(text: text, model: LocalModel(id: model, provider: .ollama))
+        XCTAssertEqual(result.startDate, "2026-10-15")
+        XCTAssertEqual(result.endDate, "2026-10-15")
+        XCTAssertNoThrow(try result.validated())
+    }
 }
