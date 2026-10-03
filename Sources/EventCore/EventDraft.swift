@@ -34,12 +34,21 @@ public struct EventDraft: Codable, Sendable, Equatable {
             return result
         }
 
-        guard !result.startTime.isEmpty, result.endTime.isEmpty,
+        guard !result.startTime.isEmpty,
               let zone = TimeZone(identifier: result.timeZone) else { return result }
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = zone
         guard let start = try? Self.date(result.startDate, time: result.startTime, calendar: calendar) else {
+            return result
+        }
+
+        if !result.endTime.isEmpty {
+            if result.endDate.isEmpty,
+               let sameDayEnd = try? Self.date(result.startDate, time: result.endTime, calendar: calendar),
+               sameDayEnd > start {
+                result.endDate = result.startDate
+            }
             return result
         }
 

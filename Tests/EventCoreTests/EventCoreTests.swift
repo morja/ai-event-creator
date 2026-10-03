@@ -251,6 +251,38 @@ final class EventCoreTests: XCTestCase {
         XCTAssertEqual(try result.validated().end.timeIntervalSince(result.validated().start), 3600)
     }
 
+    func testExplicitEndTimeWithoutEndDateUsesStartDate() throws {
+        var extracted = EventDraft()
+        extracted.title = "Intensiv-Seminar online"
+        extracted.startDate = "2026-10-03"
+        extracted.startTime = "16:30"
+        extracted.endTime = "18:30"
+        extracted.timeZone = "Europe/Berlin"
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "Intensiv-Seminar am 3. Oktober 2026 von 16:30 bis 18:30 Uhr",
+            zone: try XCTUnwrap(TimeZone(identifier: "Europe/Berlin")))
+
+        XCTAssertEqual(result.endDate, "2026-10-03")
+        XCTAssertEqual(try result.validated().end.timeIntervalSince(result.validated().start), 2 * 3600)
+    }
+
+    func testEarlierEndTimeWithoutEndDateDoesNotAssumeOvernightEvent() throws {
+        var extracted = EventDraft()
+        extracted.title = "Late meeting"
+        extracted.startDate = "2026-10-03"
+        extracted.startTime = "23:00"
+        extracted.endTime = "01:00"
+        extracted.timeZone = "Europe/Berlin"
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "Late meeting on October 3, 2026 from 23:00 to 01:00",
+            zone: try XCTUnwrap(TimeZone(identifier: "Europe/Berlin")))
+
+        XCTAssertTrue(result.endDate.isEmpty)
+        XCTAssertThrowsError(try result.validated())
+    }
+
     func testNoTimeBecomesAllDayAndCanSwitchToNineOClock() throws {
         var extracted = EventDraft()
         extracted.title = "Workshop"
