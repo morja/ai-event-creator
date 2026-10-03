@@ -1,8 +1,10 @@
-# AIEventExtractor für macOS
+# AI Event Creator für macOS
+
+Die App heißt im macOS-Dienste-Menü und im Build derzeit **AIEventExtractor**. Dieses Repository veröffentlicht ihren Quellcode als Open-Source-Vorschau unter der MIT-Lizenz.
 
 AIEventExtractor macht aus markiertem Text einen Kalendertermin. Im Kontextmenü eines Programms wählst du unter **Dienste** den Eintrag **Termin mit AIEventExtractor erstellen**. Die App liest den ausgewählten Text, lässt ihn vom eingerichteten Modell auswerten und zeigt eine kurze, editierbare Vorschau. Erst ein Klick auf **Termin erstellen** schreibt den Termin in deinen Kalender. Du kannst die App auch direkt öffnen und Text einfügen.
 
-Die App ist in SwiftUI und AppKit geschrieben, nutzt EventKit für den Kalender und braucht kein Hammerspoon. Version 0.2.7 ist ein lokaler, ad-hoc signierter Build. Sie ist nicht notarisiert oder veröffentlicht.
+Die App ist in SwiftUI und AppKit geschrieben, nutzt EventKit für den Kalender und braucht kein Hammerspoon. Version 0.2.7 ist ein lokaler, ad-hoc signierter Build. Sie ist nicht notarisiert. Es gibt noch keinen fertig geprüften App-Download; baue die Vorschau bei Bedarf aus dem Quellcode.
 
 ## Bauen und starten
 
