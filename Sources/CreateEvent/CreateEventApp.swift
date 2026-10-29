@@ -103,15 +103,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.toolbar = toolbar
             window.isReleasedWhenClosed = false
             window.delegate = self
-            window.center()
             self.window = window
+        }
+
+        // The hosting controller reports its height only after layout. Size the window first, then
+        // centre it on the screen under the pointer; centring the empty window left it off to one side.
+        if let window, !window.isVisible, let content = window.contentViewController?.view {
+            content.layoutSubtreeIfNeeded()
+            window.setContentSize(content.fittingSize)
+            let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+            if let visible = screen?.visibleFrame {
+                let frame = window.frame
+                window.setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2,
+                                              y: visible.midY - frame.height / 2))
+            }
         }
 
         // While a window is open the app belongs in the Dock and in Command-Tab. Closing it quits the app.
         NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        serviceLog.info("App window visible: \(self.window?.isVisible ?? false)")
+        serviceLog.info("App window visible: \(self.window?.isVisible ?? false), frame: \(NSStringFromRect(self.window?.frame ?? .zero))")
     }
 
     @objc func createEvent(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
