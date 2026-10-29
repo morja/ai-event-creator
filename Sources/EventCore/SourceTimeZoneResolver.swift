@@ -58,26 +58,46 @@ enum SourceTimeZoneResolver {
     }
 
     private static func taggedTimes(in source: String) -> [TaggedTime] {
-        let pattern = #"(?i)\b(\d{1,2})(?::([0-5]\d))?\s*(AM|PM)?\s*[,\(\[]?\s*(Pacific(?:\s+(?:Standard|Daylight))?\s+Time|PST|PDT|PT)\b"#
+        // An optional range start ("10:00 am - 12:00 pm PT") shares the zone written after the end time.
+        let clock = #"(\d{1,2})(?::([0-5]\d))?\s*(AM|PM)?"#
+        let rangeStart = #"(?:\b"# + clock + #"\s*(?:-|–|—|to|until|bis)\s*)?"#
+        let pattern = #"(?i)"# + rangeStart + #"\b"# + clock +
+            #"\s*[,\(\[]?\s*(Pacific(?:\s+(?:Standard|Daylight))?\s+Time|PST|PDT|PT)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let text = source as NSString
 
-        return regex.matches(in: source, range: NSRange(location: 0, length: text.length)).compactMap { match in
+        return regex.matches(in: source, range: NSRange(location: 0, length: text.length)).flatMap { match -> [TaggedTime] in
             func value(_ group: Int) -> String {
                 let range = match.range(at: group)
                 return range.location == NSNotFound ? "" : text.substring(with: range)
             }
 
-            guard var hour = Int(value(1)), hour <= 23,
-                  let zone = zone(for: value(4)) else { return nil }
-            let minute = Int(value(2)) ?? 0
-            let meridiem = value(3).uppercased()
-            if !meridiem.isEmpty {
-                guard (1...12).contains(hour) else { return nil }
-                hour = hour % 12 + (meridiem == "PM" ? 12 : 0)
+            guard let zone = zone(for: value(7)),
+                  let end = hourMinute(value(4), value(5), meridiem: value(6)) else { return [] }
+            let endTime = TaggedTime(hour: end.hour, minute: end.minute, zone: zone, range: match.range)
+            guard !value(1).isEmpty else { return [endTime] }
+
+            // A start without am/pm takes the end's half of the day unless that would put it after the end.
+            var meridiem = value(3)
+            if meridiem.isEmpty, !value(6).isEmpty {
+                meridiem = value(6)
+                if let guess = hourMinute(value(1), value(2), meridiem: meridiem),
+                   guess.hour * 60 + guess.minute > end.hour * 60 + end.minute { meridiem = "AM" }
             }
-            return TaggedTime(hour: hour, minute: minute, zone: zone, range: match.range)
+            guard let start = hourMinute(value(1), value(2), meridiem: meridiem) else { return [] }
+            return [TaggedTime(hour: start.hour, minute: start.minute, zone: zone, range: match.range), endTime]
         }
+    }
+
+    private static func hourMinute(_ hourText: String, _ minuteText: String, meridiem: String) -> (hour: Int, minute: Int)? {
+        guard var hour = Int(hourText), hour <= 23 else { return nil }
+        let minute = Int(minuteText) ?? 0
+        let half = meridiem.uppercased()
+        if !half.isEmpty {
+            guard (1...12).contains(hour) else { return nil }
+            hour = hour % 12 + (half == "PM" ? 12 : 0)
+        }
+        return (hour, minute)
     }
 
     private static func zone(for label: String) -> TimeZone? {

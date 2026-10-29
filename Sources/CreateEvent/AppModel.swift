@@ -200,9 +200,16 @@ final class AppModel: ObservableObject {
                 calendarID = calendars.first(where: { $0.calendarIdentifier == store.defaultCalendarForNewEvents?.calendarIdentifier })?.calendarIdentifier ?? calendars.first?.calendarIdentifier ?? ""
             }
             UserDefaults.standard.set(calendarID, forKey: "calendarID")
-            status = calendars.isEmpty ? "No writable calendar is available. Add one in Calendar, then refresh." : "Choose the calendar below."
+            status = calendars.isEmpty ? "No writable calendar is available. Add one in Calendar, then refresh." : ""
             return !calendars.isEmpty
         } catch { status = error.localizedDescription; return false }
+    }
+
+    /// Fill the calendar picker at launch. Without prior permission this waits for "Termin erstellen",
+    /// so macOS does not ask before the user wants to save anything.
+    func loadCalendarsIfAuthorized() async {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess, calendars.isEmpty else { return }
+        await loadCalendars()
     }
 
     func confirmAndSave() async {
@@ -236,6 +243,7 @@ final class AppModel: ObservableObject {
             event.timeZone = value.zone
             event.location = value.draft.location
             event.notes = value.draft.notes
+            event.url = value.url
             try store.save(event, span: .thisEvent, commit: true)
             saved = true
             status = "Termin in „\(calendar.title)“ gespeichert."

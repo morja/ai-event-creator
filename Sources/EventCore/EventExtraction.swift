@@ -3,7 +3,7 @@ import Foundation
 /// The same extraction contract is used for remote and local models.
 public enum EventExtraction {
     public static var schema: [String: Any] {
-        let fields = ["title", "startDate", "endDate", "startTime", "endTime", "timeZone", "location", "notes"]
+        let fields = ["title", "startDate", "endDate", "startTime", "endTime", "timeZone", "location", "notes", "url"]
         var properties: [String: Any] = Dictionary(uniqueKeysWithValues: fields.map { ($0, ["type": "string"]) })
         properties["allDay"] = ["type": "boolean"]
         properties["uncertainties"] = ["type": "array", "items": ["type": "string"]]
@@ -31,6 +31,7 @@ public enum EventExtraction {
         endDate for all-day events is the INCLUSIVE last day. For a single explicit all-day date, repeat startDate as endDate.
         For timed events with an explicit end time but no end date use the start date only if unambiguous; do not assume an overnight rollover.
         Ignore navigation, adverts, publication dates unrelated to the event. Preserve useful source details in notes, but do not fabricate URLs.
+        url: copy the most relevant link for the event (registration, tickets, event page) exactly as written in the source, otherwise empty.
         Empty uncertainties is allowed only when the source is unambiguous. Do not claim that extraction is perfect.
         """
         return [["role": "system", "content": prompt], ["role": "user", "content": text]]
@@ -41,14 +42,41 @@ public enum EventExtraction {
         guard text.count <= 30000 else { throw DraftError("Select a shorter passage, at most 30,000 characters.") }
     }
 
-    /// Recover a clear missing date, normalize an explicit source zone, then apply preview defaults.
+    /// Check the link against the source, recover a clear missing date, normalize an explicit source zone,
+    /// then apply preview defaults.
     public static func resolveDates(in draft: EventDraft, source: String, now: Date = Date(),
                                     zone: TimeZone = .current) -> EventDraft {
-        let dated = resolveMissingDates(in: draft, source: source, now: now, zone: zone)
+        let linked = resolveLink(in: draft, source: source)
+        let dated = resolveMissingDates(in: linked, source: source, now: now, zone: zone)
         let normalized = SourceTimeZoneResolver.resolve(in: dated, source: source, now: now, destination: zone)
         let timePattern = #"(?i)\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|0?[1-9])\s*(?:a\.?m\.?|p\.?m\.?)\b|\b(?:[01]?\d|2[0-3])(?:\.[0-5]\d)?\s*Uhr\b"#
         let sourceHasTime = source.range(of: timePattern, options: .regularExpression) != nil
         return normalized.withTimeDefaults(sourceHasTime: sourceHasTime)
+    }
+
+    /// Keep the model's link only if it occurs in the source. Without one, a single source link is used;
+    /// several links stay unresolved rather than guessing.
+    static func resolveLink(in draft: EventDraft, source: String) -> EventDraft {
+        let links = webLinks(in: source)
+        var resolved = draft
+        let proposed = URL(string: draft.url.trimmingCharacters(in: .whitespacesAndNewlines))?.absoluteString ?? ""
+        if proposed.isEmpty || !links.contains(proposed) {
+            resolved.url = links.count == 1 ? links[0] : ""
+        } else {
+            resolved.url = proposed
+        }
+        return resolved
+    }
+
+    private static func webLinks(in source: String) -> [String] {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        let range = NSRange(source.startIndex..., in: source)
+        var links: [String] = []
+        for match in detector.matches(in: source, range: range) {
+            guard let url = match.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { continue }
+            if !links.contains(url.absoluteString) { links.append(url.absoluteString) }
+        }
+        return links
     }
 
     /// More than one date expression stays unresolved rather than choosing the first one.

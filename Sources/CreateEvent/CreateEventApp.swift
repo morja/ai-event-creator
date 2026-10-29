@@ -3,12 +3,52 @@ import OSLog
 import SwiftUI
 import EventCore
 
+/// A plain AppKit entry point. A SwiftUI Settings scene would open its own window on every launch;
+/// the settings live in a sheet of the main window instead.
 @main
-struct CreateEventApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+enum CreateEventApp {
+    @MainActor static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.mainMenu = mainMenu(delegate: delegate)
+        app.run()
+    }
 
-    var body: some Scene {
-        Settings { SettingsView(model: delegate.model) }
+    /// Text fields need an Edit menu for copy, paste and undo shortcuts.
+    @MainActor private static func mainMenu(delegate: AppDelegate) -> NSMenu {
+        let menu = NSMenu()
+
+        let appMenu = NSMenu()
+        let settings = NSMenuItem(title: "Einstellungen…", action: #selector(AppDelegate.openSettings), keyEquivalent: ",")
+        settings.target = delegate
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "AIEventExtractor beenden", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(submenu: appMenu, title: "AIEventExtractor")
+
+        let edit = NSMenu(title: "Bearbeiten")
+        edit.addItem(withTitle: "Widerrufen", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Wiederholen", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Ausschneiden", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Kopieren", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Einsetzen", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Alles auswählen", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        menu.addItem(submenu: edit, title: "Bearbeiten")
+
+        let window = NSMenu(title: "Fenster")
+        window.addItem(withTitle: "Schließen", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        menu.addItem(submenu: window, title: "Fenster")
+        return menu
+    }
+}
+
+private extension NSMenu {
+    func addItem(submenu: NSMenu, title: String) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        addItem(item)
     }
 }
 
@@ -24,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSUpdateDynamicServices()
 
         model.onExtractionFinished = { [weak self] in self?.showWindow() }
+        Task { await model.loadCalendarsIfAuthorized() }
 
         // A Services launch is not a default app launch. Stay invisible until the preview is ready.
         let defaultLaunch = (notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? NSNumber)?.boolValue ?? true
@@ -36,6 +77,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
+    @objc func openSettings() {
+        showWindow()
+        model.showSettings = true
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func windowWillClose(_ notification: Notification) {
@@ -44,23 +90,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showWindow() {
         if window == nil {
-            let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-            let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 750)
-            let width = min(760, visible.width - 32)
-            let height = min(820, visible.height - 44)
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                                  backing: .buffered, defer: false)
+            // The window follows the height of its content instead of opening at screen height.
+            let host = NSHostingController(rootView: ContentView(model: model).frame(width: Layout.windowWidth))
+            host.sizingOptions = [.preferredContentSize]
+            let window = NSWindow(contentViewController: host)
+            window.styleMask = [.titled, .closable, .miniaturizable]
             window.title = "AIEventExtractor"
-            window.contentView = NSHostingView(rootView: ContentView(model: model))
-            window.minSize = NSSize(width: min(580, width), height: min(460, height))
+            window.toolbarStyle = .unified
+            let toolbar = NSToolbar(identifier: "main")
+            toolbar.delegate = self
+            toolbar.displayMode = .iconOnly
+            window.toolbar = toolbar
             window.isReleasedWhenClosed = false
             window.delegate = self
-            let frame = window.frame
-            window.setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2,
-                                          y: visible.midY - frame.height / 2))
+            window.center()
             self.window = window
         }
+
+        // While a window is open the app belongs in the Dock and in Command-Tab. Closing it quits the app.
+        NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         serviceLog.info("App window visible: \(self.window?.isVisible ?? false)")
@@ -68,10 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func createEvent(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
         serviceLog.info("Service request received")
-        guard let text = pasteboard.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let plain = pasteboard.string(forType: .string), !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             error.pointee = "Bitte zuerst Text auswählen."
             return
         }
+        let text = Self.appendingHiddenLinks(to: plain, from: pasteboard)
         guard text.count <= 30000 else {
             error.pointee = "Bitte höchstens 30.000 Zeichen auswählen."
             return
@@ -96,39 +145,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         model.receive(text, automatic: true)
     }
+
+    /// Buttons in mails hide their target in rich text only. List those links below the plain text.
+    static func appendingHiddenLinks(to text: String, from pasteboard: NSPasteboard) -> String {
+        let rich: NSAttributedString?
+        if let data = pasteboard.data(forType: .rtf) {
+            rich = NSAttributedString(rtf: data, documentAttributes: nil)
+        } else if let data = pasteboard.data(forType: .rtfd) {
+            rich = NSAttributedString(rtfd: data, documentAttributes: nil)
+        } else if let data = pasteboard.data(forType: .html) {
+            rich = NSAttributedString(html: data, documentAttributes: nil)
+        } else {
+            rich = nil
+        }
+        guard let rich else { return text }
+
+        var lines: [String] = []
+        rich.enumerateAttribute(.link, in: NSRange(location: 0, length: rich.length)) { value, range, _ in
+            let url = (value as? URL) ?? (value as? String).flatMap(URL.init(string:))
+            guard let url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  !text.contains(url.absoluteString) else { return }
+            let label = rich.attributedSubstring(from: range).string.trimmingCharacters(in: .whitespacesAndNewlines)
+            let line = label.isEmpty ? url.absoluteString : "\(label): \(url.absoluteString)"
+            if !lines.contains(line) { lines.append(line) }
+        }
+        return lines.isEmpty ? text : text + "\n\nLinks:\n" + lines.joined(separator: "\n")
+    }
+}
+
+extension AppDelegate: NSToolbarDelegate {
+    private static let settingsItem = NSToolbarItem.Identifier("settings")
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.settingsItem]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard identifier == Self.settingsItem else { return nil }
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = "Einstellungen"
+        item.toolTip = "Einstellungen"
+        item.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Einstellungen")
+        item.target = self
+        item.action = #selector(openSettings)
+        return item
+    }
+}
+
+/// Spacing and sizes of the main window, kept in one place. Rows inside a group sit closer
+/// together than the groups themselves.
+enum Layout {
+    static let windowWidth: CGFloat = 560
+    static let windowPadding: CGFloat = 20
+    static let groupSpacing: CGFloat = 16
+    static let rowSpacing: CGFloat = 10
+    static let groupInset: CGFloat = 8
+    static let labelWidth: CGFloat = 64
 }
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
-    @State private var detailsExpanded = true
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text(isPreview ? "Terminvorschau" : "AIEventExtractor")
-                        .font(.title2.weight(.semibold))
-                    Spacer()
-                    Button("Einstellungen…") { model.showSettings = true }
-                }
-
-                if model.saved {
-                    success
-                } else if model.showsComposer {
-                    composer
-                } else if model.busy {
-                    progress
-                } else if model.draft.title.isEmpty {
-                    failure
-                } else {
-                    preview
-                }
+        VStack(alignment: .leading, spacing: Layout.groupSpacing) {
+            if model.saved {
+                success
+            } else if model.showsComposer {
+                composer
+            } else if model.busy {
+                progress
+            } else if model.draft.title.isEmpty {
+                failure
+            } else {
+                preview
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(Layout.windowPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
-        .onChange(of: model.source) { _, _ in detailsExpanded = true }
     }
 
     private var isPreview: Bool {
@@ -136,26 +235,30 @@ struct ContentView: View {
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Text für einen Termin einfügen").font(.title3.weight(.medium))
-            TextEditor(text: $model.source)
-                .frame(height: 210)
-                .padding(6)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
-                .accessibilityLabel("Termintext")
-            Text("Oder Text in einer anderen App markieren und den Dienst „Termin mit AIEventExtractor erstellen“ wählen.")
+        VStack(alignment: .leading, spacing: Layout.groupSpacing) {
+            Text("Text für einen Termin einfügen").font(.title3.weight(.semibold))
+            GroupBox {
+                TextEditor(text: $model.source)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .frame(height: 210)
+                    .padding(Layout.groupInset)
+                    .accessibilityLabel("Termintext")
+            }
+            Text("Oder Text in einer anderen App markieren und den Dienst „Termin mit AIEventExtractor erstellen“ wählen. Bei OpenRouter wird der Text dabei übertragen.")
                 .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
+                Spacer()
                 Button("Terminvorschau erstellen") {
                     model.showsComposer = false
                     model.extract()
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Spacer()
-                Text("Bei OpenRouter wird der Text dabei übertragen.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
+            .controlSize(.large)
         }
     }
 
@@ -199,97 +302,150 @@ struct ContentView: View {
     }
 
     private var preview: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Layout.groupSpacing) {
             if !model.draft.uncertainties.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(model.draft.uncertainties.enumerated()), id: \.offset) { _, warning in
-                        Text("• \(warning)")
+                        Label(warning, systemImage: "exclamationmark.triangle")
                     }
                 }
-                .padding(10)
+                .font(.callout)
+                .padding(Layout.groupInset + 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.orange.opacity(0.13), in: RoundedRectangle(cornerRadius: 8))
             }
 
-            TextField("Titel", text: $model.draft.title)
-                .font(.title2)
-                .textFieldStyle(.roundedBorder)
-
-            Toggle("Ganztägig", isOn: Binding(
-                get: { model.draft.allDay },
-                set: { model.setAllDay($0) }
-            ))
-
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
-                GridRow {
-                    Text("Beginn")
-                    HStack {
-                        PreviewPickerField(text: $model.startDate, presentation: model.presentation, date: true)
-                        if !model.draft.allDay {
-                            PreviewPickerField(text: $model.startTime, presentation: model.presentation, date: false)
+            GroupBox {
+                VStack(alignment: .leading, spacing: Layout.rowSpacing) {
+                    TextField("Titel", text: $model.draft.title)
+                        .font(.title3.weight(.semibold))
+                        .textFieldStyle(.plain)
+                    Divider()
+                    Grid(alignment: .leading, horizontalSpacing: Layout.rowSpacing, verticalSpacing: Layout.rowSpacing) {
+                        GridRow {
+                            Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                            Toggle("Ganztägig", isOn: Binding(
+                                get: { model.draft.allDay },
+                                set: { model.setAllDay($0) }
+                            ))
+                        }
+                        GridRow {
+                            label("Beginn")
+                            dateRow(date: $model.startDate, time: $model.startTime)
+                        }
+                        GridRow {
+                            label(model.draft.allDay ? "Bis" : "Ende")
+                            dateRow(date: $model.endDate, time: $model.endTime)
                         }
                     }
                 }
-                GridRow {
-                    Text(model.draft.allDay ? "Letzter Tag" : "Ende")
-                    HStack {
-                        PreviewPickerField(text: $model.endDate, presentation: model.presentation, date: true)
-                        if !model.draft.allDay {
-                            PreviewPickerField(text: $model.endTime, presentation: model.presentation, date: false)
-                        }
-                    }
-                }
-                GridRow {
-                    Text("Ort")
-                    TextField("Optional", text: $model.draft.location)
-                }
+                .padding(Layout.groupInset)
             }
-            .textFieldStyle(.roundedBorder)
 
-            DisclosureGroup("Weitere Angaben", isExpanded: $detailsExpanded) {
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack {
-                        Text("Zeitzone")
-                        TextField("Europe/Berlin", text: $model.draft.timeZone)
-                            .textFieldStyle(.roundedBorder)
+            GroupBox {
+                Grid(alignment: .leading, horizontalSpacing: Layout.rowSpacing, verticalSpacing: Layout.rowSpacing) {
+                    GridRow {
+                        label("Ort")
+                        TextField("Optional", text: $model.draft.location)
                     }
-                    Text("Notizen").font(.callout)
+                    GridRow {
+                        label("Link")
+                        TextField("Optional", text: $model.draft.url)
+                    }
+                    GridRow {
+                        label("Zeitzone")
+                        TextField("Europe/Berlin", text: $model.draft.timeZone)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .padding(Layout.groupInset)
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: Layout.rowSpacing) {
+                    Text("Notizen").foregroundStyle(.secondary)
                     TextEditor(text: $model.draft.notes)
-                        .frame(height: 58)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                    HStack {
-                        Picker("Kalender", selection: $model.calendarID) {
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(height: 76)
+                        // The text view's inner line padding would indent the text past the label above.
+                        .padding(.leading, -5)
+                    Divider()
+                    HStack(spacing: Layout.rowSpacing) {
+                        label("Kalender")
+                        Picker("Kalender", selection: calendarSelection) {
                             Text("Standardkalender").tag("")
                             ForEach(model.calendars, id: \.calendarIdentifier) { calendar in
                                 Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
                             }
                         }
-                        Button("Aktualisieren") { Task { await model.loadCalendars() } }
-                    }
-                    DisclosureGroup("Originaltext") {
-                        Text(model.source).textSelection(.enabled).font(.callout)
+                        .labelsHidden()
+                        Button { Task { await model.loadCalendars() } } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Kalender neu laden")
+                        .accessibilityLabel("Kalender neu laden")
                     }
                 }
-                .padding(.top, 5)
+                .padding(Layout.groupInset)
+            }
+
+            DisclosureGroup("Originaltext") {
+                ScrollView {
+                    Text(model.source)
+                        .textSelection(.enabled)
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 140)
             }
 
             if !model.status.isEmpty { Text(model.status).font(.callout).textSelection(.enabled) }
 
-            HStack {
+            HStack(spacing: Layout.rowSpacing) {
+                if model.saving { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Verwerfen") { NSApp.terminate(nil) }
+                    .keyboardShortcut(.cancelAction)
                 Button("Termin erstellen") {
                     Task {
                         await model.confirmAndSave()
                         if model.saved { NSApp.terminate(nil) }
                     }
                 }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.busy || model.saving || model.saved)
-                if model.saving { ProgressView().controlSize(.small) }
-                Spacer()
-                Button("Verwerfen") { NSApp.terminate(nil) }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.busy || model.saving || model.saved)
             }
+            .controlSize(.large)
         }
         .disabled(model.saving || model.saved)
+    }
+
+    /// A stored calendar that is not loaded (yet) shows as the default calendar instead of an empty picker.
+    private var calendarSelection: Binding<String> {
+        Binding(
+            get: { model.calendars.contains { $0.calendarIdentifier == model.calendarID } ? model.calendarID : "" },
+            set: { model.calendarID = $0 }
+        )
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .frame(width: Layout.labelWidth, alignment: .leading)
+    }
+
+    private func dateRow(date: Binding<String>, time: Binding<String>) -> some View {
+        HStack(spacing: Layout.rowSpacing) {
+            PreviewPickerField(text: date, presentation: model.presentation, date: true)
+            if !model.draft.allDay {
+                PreviewPickerField(text: time, presentation: model.presentation, date: false)
+                    .frame(width: 130)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

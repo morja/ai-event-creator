@@ -17,6 +17,7 @@ public struct EventDraft: Codable, Sendable, Equatable {
     public var allDay: Bool = false
     public var location: String = ""
     public var notes: String = ""
+    public var url: String = ""
     public var uncertainties: [String] = []
 
     public init() {}
@@ -92,6 +93,17 @@ public struct EventDraft: Codable, Sendable, Equatable {
         guard title.count <= 500, location.count <= 2000, notes.count <= 20000 else {
             throw DraftError("The title, location or notes are too long.")
         }
+
+        // Only web links are stored; an empty field leaves the event without a URL.
+        let link = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        var eventURL: URL?
+        if !link.isEmpty {
+            guard link.count <= 2000, let parsed = URL(string: link),
+                  ["http", "https"].contains(parsed.scheme?.lowercased() ?? ""), parsed.host != nil else {
+                throw DraftError("Enter a complete web link starting with https:// or leave the URL empty.")
+            }
+            eventURL = parsed
+        }
         guard let zone = TimeZone(identifier: timeZone) else {
             throw DraftError("Choose a valid IANA time zone, for example Europe/Berlin.")
         }
@@ -109,7 +121,7 @@ public struct EventDraft: Codable, Sendable, Equatable {
             end = exclusiveEnd
         }
         guard end > start else { throw DraftError("The end must be later than the start.") }
-        return ValidatedEvent(draft: self, start: start, end: end, zone: zone)
+        return ValidatedEvent(draft: self, start: start, end: end, zone: zone, url: eventURL)
     }
 
     private static func date(_ day: String, time: String, calendar: Calendar) throws -> Date {
@@ -150,6 +162,7 @@ public struct ValidatedEvent: Sendable {
     public let start: Date
     public let end: Date
     public let zone: TimeZone
+    public let url: URL?
 }
 
 /// German editing is explicit; other locales use their short date and preferred time format.

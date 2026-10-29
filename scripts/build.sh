@@ -11,8 +11,17 @@ rm -f "$app/Contents/MacOS/CreateEvent"
 cp "$(swift build -c release --show-bin-path)/AIEventExtractor" "$app/Contents/MacOS/AIEventExtractor"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp -R Resources/de.lproj Resources/en.lproj "$app/Contents/Resources/"
-# Ad-hoc signing is suitable for local builds, not a notarized public release.
-codesign --force --sign "${CODE_SIGN_IDENTITY:--}" "$app"
+# A stable local identity keeps Calendar and Keychain permissions across rebuilds; ad-hoc signing
+# would make every build a new app for macOS. Neither is suitable for a notarized public release.
+identity="${CODE_SIGN_IDENTITY:-}"
+if [[ -z "$identity" ]]; then
+    if security find-identity -p codesigning | grep -q '"AIEventExtractor Local"'; then
+        identity="AIEventExtractor Local"
+    else
+        identity="-"
+    fi
+fi
+codesign --force --sign "$identity" "$app"
 plutil -lint "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Resources/de.lproj/ServicesMenu.strings" "$app/Contents/Resources/en.lproj/ServicesMenu.strings"
 codesign --verify --strict "$app"

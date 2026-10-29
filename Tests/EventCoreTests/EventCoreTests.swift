@@ -585,4 +585,68 @@ final class EventCoreTests: XCTestCase {
         XCTAssertEqual(normalized.startTime, "09:05")
         XCTAssertEqual(normalized.endTime, "later")
     }
+
+    func testSingleSourceLinkFillsMissingURL() throws {
+        var extracted = EventDraft()
+        extracted.title = "Jahresabschlussfeier"
+        extracted.startDate = "2026-11-26"
+        extracted.startTime = "17:00"
+        extracted.endTime = "21:00"
+        let source = """
+        Wann & Wo: 26.11., von 17 – 21 Uhr, KitchenHUB, Lindenschmitstraße 1
+        Anmeldung: https://www.tickettailor.com/events/tellerrandkochenmuc/1979457
+        """
+
+        let result = EventExtraction.resolveDates(in: extracted, source: source, zone: TimeZone(identifier: "Europe/Berlin")!)
+        XCTAssertEqual(result.url, "https://www.tickettailor.com/events/tellerrandkochenmuc/1979457")
+        XCTAssertEqual(try result.validated().url?.host, "www.tickettailor.com")
+    }
+
+    func testURLMustComeFromSource() {
+        let source = "Infos: https://example.org/a und Tickets: https://example.org/b"
+        var extracted = EventDraft()
+
+        extracted.url = "https://example.org/b"
+        XCTAssertEqual(EventExtraction.resolveLink(in: extracted, source: source).url, "https://example.org/b")
+
+        // An invented link is dropped, and with several source links none is guessed.
+        extracted.url = "https://phishing.example/b"
+        XCTAssertEqual(EventExtraction.resolveLink(in: extracted, source: source).url, "")
+    }
+
+    func testURLValidationRejectsNonWebLinks() {
+        var draft = EventDraft()
+        draft.title = "Test"
+        draft.startDate = "2026-11-26"
+        draft.endDate = "2026-11-26"
+        draft.startTime = "17:00"
+        draft.endTime = "18:00"
+        draft.timeZone = "Europe/Berlin"
+        draft.url = "javascript:alert(1)"
+        XCTAssertThrowsError(try draft.validated())
+        draft.url = ""
+        XCTAssertNil(try draft.validated().url)
+    }
+
+    func testPacificRangeWithSingleZoneKeepsStartTime() throws {
+        var extracted = draft()
+        extracted.startDate = "2026-11-11"
+        extracted.endDate = extracted.startDate
+        extracted.startTime = "10:00"
+        extracted.endTime = "12:00"
+        extracted.timeZone = "America/Los_Angeles"
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-29T12:00:00Z"))
+
+        let result = EventExtraction.resolveDates(in: extracted,
+            source: "which will be on November 11, 2026 from 10:00 am - 12:00 pm Pacific Time", now: now, zone: berlin)
+        XCTAssertEqual(result.startTime, "19:00")
+        XCTAssertEqual(result.endTime, "21:00")
+
+        // A start without am/pm takes the end's half of the day unless it would come after the end.
+        let short = EventExtraction.resolveDates(in: extracted,
+            source: "November 11, 2026, 11 - 1 pm PT", now: now, zone: berlin)
+        XCTAssertEqual(short.startTime, "20:00")
+        XCTAssertEqual(short.endTime, "22:00")
+    }
 }
