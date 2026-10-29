@@ -563,4 +563,26 @@ final class EventCoreTests: XCTestCase {
         XCTAssertEqual(result.endDate, "2026-10-15")
         XCTAssertNoThrow(try result.validated())
     }
+
+    func testTimestampsInTimeFieldsAreReducedToWireFormats() throws {
+        let content = """
+        {"title": "Weihnachtsfeier", "startDate": "", "endDate": "2026-12-15T19:30:00+01:00",
+         "startTime": "2026-12-15T17:00:00", "endTime": "19:30:00", "timeZone": "Europe/Berlin",
+         "allDay": false, "location": "", "notes": "", "url": "", "uncertainties": []}
+        """
+        let draft = try EventExtraction.decodeContent(content)
+        XCTAssertEqual(draft.startDate, "2026-12-15")
+        XCTAssertEqual(draft.startTime, "17:00")
+        XCTAssertEqual(draft.endDate, "2026-12-15")
+        XCTAssertEqual(draft.endTime, "19:30")
+        XCTAssertNoThrow(try draft.validated())
+
+        // Single-digit hours are padded; anything else is left for validation to reject.
+        var odd = EventDraft()
+        odd.startTime = "9:05"
+        odd.endTime = "later"
+        let normalized = EventExtraction.normalizeWireFields(in: odd)
+        XCTAssertEqual(normalized.startTime, "09:05")
+        XCTAssertEqual(normalized.endTime, "later")
+    }
 }

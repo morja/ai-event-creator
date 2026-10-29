@@ -128,12 +128,54 @@ public enum EventExtraction {
         return text.contains("mehrere") || text.contains("multiple") || text.contains("mehrdeutig") || text.contains("ambiguous")
     }
 
+    /// Models sometimes answer with full timestamps ("2026-12-15T17:00:00") or seconds ("17:00:00")
+    /// instead of the requested YYYY-MM-DD and HH:mm. Reduce those to the wire formats; anything else stays
+    /// untouched so that validation can still reject it.
+    static func normalizeWireFields(in draft: EventDraft) -> EventDraft {
+        let timestamp = #"^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}:?\d{2})?$"#
+        let clock = #"^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$"#
+
+        func parts(of value: String, pattern: String) -> [String]? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return nil }
+            return (1..<match.numberOfRanges).compactMap { index in
+                Range(match.range(at: index), in: value).map { String(value[$0]) }
+            }
+        }
+
+        func clockString(hour: String, minute: String) -> String {
+            String(format: "%02d:%@", Int(hour) ?? 0, minute)
+        }
+
+        // A timestamp in a time field yields the clock, and the day when the date field is still empty.
+        func normalize(date: inout String, time: inout String) {
+            let trimmedDate = date.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedTime = time.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let found = parts(of: trimmedDate, pattern: timestamp) {
+                date = found[0]
+                if trimmedTime.isEmpty { time = clockString(hour: found[1], minute: found[2]) }
+            }
+            if let found = parts(of: trimmedTime, pattern: timestamp) {
+                time = clockString(hour: found[1], minute: found[2])
+                if date.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { date = found[0] }
+            } else if let found = parts(of: trimmedTime, pattern: clock) {
+                time = clockString(hour: found[0], minute: found[1])
+            }
+        }
+
+        var result = draft
+        normalize(date: &result.startDate, time: &result.startTime)
+        normalize(date: &result.endDate, time: &result.endTime)
+        return result
+    }
+
     public static func decodeContent(_ content: String) throws -> EventDraft {
         guard let data = content.data(using: .utf8), data.count <= 200000 else {
             throw DraftError("The model answer was too large.")
         }
         do {
-            let draft = try JSONDecoder().decode(EventDraft.self, from: data)
+            let draft = normalizeWireFields(in: try JSONDecoder().decode(EventDraft.self, from: data))
             guard draft.uncertainties.count <= 50 else { throw DraftError("The answer contained too many warnings.") }
             return draft
         } catch let error as DraftError { throw error }
