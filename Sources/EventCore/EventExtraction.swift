@@ -32,6 +32,9 @@ public enum EventExtraction {
         For timed events with an explicit end time but no end date use the start date only if unambiguous; do not assume an overnight rollover.
         Ignore navigation, adverts, publication dates unrelated to the event. Preserve useful source details in notes, but do not fabricate URLs.
         url: copy the most relevant link for the event (registration, tickets, event page) exactly as written in the source, otherwise empty.
+        A stay with arrival and departure (Anreise/Abreise, check-in/check-out) is ONE all-day event covering its nights:
+        startDate is the arrival day, endDate the day before departure. Name the place in the title, not the arrival,
+        and keep check-in and check-out times and the departure date in notes.
         Empty uncertainties is allowed only when the source is unambiguous. Do not claim that extraction is perfect.
         """
         return [["role": "system", "content": prompt], ["role": "user", "content": text]]
@@ -42,12 +45,13 @@ public enum EventExtraction {
         guard text.count <= 30000 else { throw DraftError("Select a shorter passage, at most 30,000 characters.") }
     }
 
-    /// Check the link against the source, recover a clear missing date, normalize an explicit source zone,
-    /// then apply preview defaults.
+    /// Check the link against the source, apply stated stay dates, recover a clear missing date,
+    /// normalize an explicit source zone, then apply preview defaults.
     public static func resolveDates(in draft: EventDraft, source: String, now: Date = Date(),
                                     zone: TimeZone = .current) -> EventDraft {
         let linked = resolveLink(in: draft, source: source)
-        let dated = resolveMissingDates(in: linked, source: source, now: now, zone: zone)
+        let stay = resolveStay(in: linked, source: source, now: now, zone: zone)
+        let dated = resolveMissingDates(in: stay, source: source, now: now, zone: zone)
         let normalized = SourceTimeZoneResolver.resolve(in: dated, source: source, now: now, destination: zone)
         let timePattern = #"(?i)\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|0?[1-9])\s*(?:a\.?m\.?|p\.?m\.?)\b|\b(?:[01]?\d|2[0-3])(?:\.[0-5]\d)?\s*Uhr\b"#
         let sourceHasTime = source.range(of: timePattern, options: .regularExpression) != nil
@@ -79,6 +83,88 @@ public enum EventExtraction {
         return links
     }
 
+    private static let germanMonths = ["januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5,
+                                       "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
+                                       "november": 11, "dezember": 12]
+    private static let englishMonths = ["january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+                                        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+                                        "december": 12]
+
+    /// Booking mails state arrival and departure explicitly, yet models treat them differently from one
+    /// mail to the next. A stay always covers its nights, as in Airbnb's calendar export: one night is one
+    /// day, and the departure day moves to the notes. Several different dates, as in a mail with two
+    /// stays, stay untouched.
+    private static func resolveStay(in draft: EventDraft, source: String, now: Date, zone: TimeZone) -> EventDraft {
+        let arrivals = Set(statedDates(after: #"Anreise(?:datum)?|Check-?in|Arrival"#, in: source, now: now, zone: zone))
+        let departures = Set(statedDates(after: #"Abreise(?:datum)?|Check-?out|Departure"#, in: source, now: now, zone: zone))
+        guard arrivals.count == 1, departures.count == 1,
+              let arrival = arrivals.first, let departure = departures.first, arrival < departure else { return draft }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let parts = departure.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let departureDay = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])),
+              let lastNight = calendar.date(byAdding: .day, value: -1, to: departureDay) else { return draft }
+        let last = calendar.dateComponents([.year, .month, .day], from: lastNight)
+
+        var resolved = draft
+        resolved.allDay = true
+        resolved.startDate = arrival
+        resolved.endDate = String(format: "%04d-%02d-%02d", last.year ?? 0, last.month ?? 0, last.day ?? 0)
+        resolved.startTime = ""
+        resolved.endTime = ""
+
+        // The calendar no longer shows the departure day, so the notes must.
+        let departureText = String(format: "%02d.%02d.%04d", parts[2], parts[1], parts[0])
+        if !resolved.notes.contains(departureText) {
+            let line = "Check-out: \(departureText)"
+            resolved.notes = resolved.notes.isEmpty ? line : resolved.notes + "\n" + line
+        }
+        return resolved
+    }
+
+    /// ISO dates that directly follow a label. No digit may stand between them, so that
+    /// "Check-in um 15:00 Uhr; Check-out 2. November" does not read as a check-in date.
+    private static func statedDates(after labels: String, in source: String, now: Date, zone: TimeZone) -> [String] {
+        let months = germanMonths.merging(englishMonths) { first, _ in first }
+        let names = months.keys.sorted().joined(separator: "|")
+        let german = #"(\d{1,2})\.?\s*("# + names + #")(?:\s+(\d{4}))?"#
+        let numeric = #"(\d{1,2})\.(\d{1,2})\.(\d{4})?"#
+        let english = #"("# + names + #")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?"#
+        let pattern = #"(?i)\b(?:"# + labels + #")\b[^\d;]{0,40}?(?:"# + german + "|" + numeric + "|" + english + ")"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let currentYear = calendar.component(.year, from: now)
+        let text = source as NSString
+
+        return regex.matches(in: source, range: NSRange(location: 0, length: text.length)).compactMap { match in
+            func value(_ group: Int) -> String {
+                let range = match.range(at: group)
+                return range.location == NSNotFound ? "" : text.substring(with: range)
+            }
+
+            let day: Int?
+            let month: Int?
+            let yearText: String
+            if !value(1).isEmpty {
+                (day, month, yearText) = (Int(value(1)), months[value(2).lowercased()], value(3))
+            } else if !value(4).isEmpty {
+                (day, month, yearText) = (Int(value(4)), Int(value(5)), value(6))
+            } else {
+                (day, month, yearText) = (Int(value(8)), months[value(7).lowercased()], value(9))
+            }
+
+            guard let day, let month else { return nil }
+            let fields = DateComponents(year: Int(yearText) ?? currentYear, month: month, day: day)
+            guard let date = calendar.date(from: fields),
+                  calendar.dateComponents([.year, .month, .day], from: date) == fields else { return nil }
+            return String(format: "%04d-%02d-%02d", fields.year ?? 0, month, day)
+        }
+    }
+
     /// More than one date expression stays unresolved rather than choosing the first one.
     private static func resolveMissingDates(in draft: EventDraft, source: String, now: Date,
                                             zone: TimeZone) -> EventDraft {
@@ -86,9 +172,7 @@ public enum EventExtraction {
               !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !draft.uncertainties.contains(where: isMultipleEventsWarning) else { return draft }
 
-        let months = ["januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5,
-                      "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
-                      "november": 11, "dezember": 12]
+        let months = germanMonths
         let monthPattern = months.keys.sorted().joined(separator: "|")
         let rangePattern = #"(?i)\b([0-3]?\d)\.\s*(?:bis|[-–])\s*([0-3]?\d)\.\s*("# + monthPattern + #")\b(?:\s+(\d{4}))?"#
         let singlePattern = #"(?i)\b([0-3]?\d)\.\s*("# + monthPattern + #")\b(?:\s+(\d{4}))?"#

@@ -649,4 +649,79 @@ final class EventCoreTests: XCTestCase {
         XCTAssertEqual(short.startTime, "20:00")
         XCTAssertEqual(short.endTime, "22:00")
     }
+
+    func testStayCoversItsNightsWhateverTheModelReturned() throws {
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-30T12:00:00Z"))
+        let source = """
+        Check-in ist am Anreisetag um 15:00 Uhr; Check-out bis 12:00 Uhr
+        Buchungsinformationen
+        Anreise
+        Sonntag, 1. November 2026 (ab 15:00)
+        Abreise
+        Montag, 2. November 2026 (bis 12:00)
+        """
+
+        // One night is one day, however the model shaped the event.
+        var extracted = EventDraft()
+        extracted.title = "NH Collection Heidelberg"
+        extracted.allDay = true
+        extracted.startDate = "2026-11-01"
+        extracted.endDate = "2026-11-02"
+        extracted.notes = "Anreise ab 15:00, Abreise bis 12:00."
+        var result = EventExtraction.resolveDates(in: extracted, source: source, now: now, zone: berlin)
+        XCTAssertTrue(result.allDay)
+        XCTAssertEqual(result.startDate, "2026-11-01")
+        XCTAssertEqual(result.endDate, "2026-11-01")
+        XCTAssertEqual(result.notes, "Anreise ab 15:00, Abreise bis 12:00.\nCheck-out: 02.11.2026")
+        XCTAssertNoThrow(try result.validated())
+
+        extracted.allDay = false
+        extracted.startTime = "15:00"
+        extracted.endTime = "12:00"
+        extracted.notes = "Check-out: 02.11.2026"
+        result = EventExtraction.resolveDates(in: extracted, source: source, now: now, zone: berlin)
+        XCTAssertTrue(result.allDay)
+        XCTAssertEqual(result.startTime, "")
+        XCTAssertEqual(result.endTime, "")
+        XCTAssertEqual(result.endDate, "2026-11-01")
+        XCTAssertEqual(result.notes, "Check-out: 02.11.2026")
+    }
+
+    func testStayDateFormatsAndSeveralNights() throws {
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-30T12:00:00Z"))
+        var extracted = EventDraft()
+        extracted.title = "Naturhotel Blaubach"
+        extracted.allDay = true
+        extracted.startDate = "2026-10-31"
+        extracted.endDate = "2026-10-31"
+
+        for source in ["Anreise: 31.10.2026, Abreise: 01.11.2026",
+                       "Check-in: Saturday, October 31, 2026\nCheck-out: Sunday, November 1, 2026",
+                       "Arrival 31 October 2026, departure 1 November 2026"] {
+            let result = EventExtraction.resolveDates(in: extracted, source: source, now: now, zone: berlin)
+            XCTAssertEqual(result.endDate, "2026-10-31", source)
+        }
+
+        // The last night of a stay across a month boundary.
+        let longer = EventExtraction.resolveDates(in: extracted, source: "Anreise: 31.10.2026, Abreise: 03.11.2026",
+                                                  now: now, zone: berlin)
+        XCTAssertEqual(longer.startDate, "2026-10-31")
+        XCTAssertEqual(longer.endDate, "2026-11-02")
+    }
+
+    func testTwoStaysAndPlainEventsStayUntouched() throws {
+        let berlin = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-30T12:00:00Z"))
+        var extracted = EventDraft()
+        extracted.title = "Reise"
+        extracted.allDay = true
+        extracted.startDate = "2026-11-01"
+        extracted.endDate = "2026-11-01"
+
+        let twoStays = "Anreise 1. November 2026, Abreise 2. November 2026. Anreise 5. November 2026, Abreise 6. November 2026."
+        XCTAssertEqual(EventExtraction.resolveDates(in: extracted, source: twoStays, now: now, zone: berlin).endDate, "2026-11-01")
+        XCTAssertEqual(EventExtraction.resolveDates(in: extracted, source: "Treffen am 1. November 2026", now: now, zone: berlin).endDate, "2026-11-01")
+    }
 }
